@@ -11,6 +11,23 @@
   <!-- Babel -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
+  <!-- Firebase Compat (carrega ANTES do Babel para estar disponível globalmente) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+
+  <!-- Inicializa Firebase e expõe db globalmente ANTES do React -->
+  <script>
+    firebase.initializeApp({
+      apiKey: "AIzaSyAtwvpF7yCEMHkWAdi_IjmLohHKf-NHTdM",
+      authDomain: "nutriplanpro-8b7a6.firebaseapp.com",
+      projectId: "nutriplanpro-8b7a6",
+      storageBucket: "nutriplanpro-8b7a6.firebasestorage.app",
+      messagingSenderId: "648475954723",
+      appId: "1:648475954723:web:e464c7d9568f9a3284eb96"
+    });
+    window.__nutridb__ = firebase.firestore();
+  </script>
+
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { background: #0f1117; }
@@ -22,68 +39,14 @@
     input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     input[type=number] { -moz-appearance: textfield; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    @keyframes spin  { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
   <div id="root"></div>
-  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
-
-  <!-- Firebase carregado via CDN clássico (UMD) — compatível com scripts normais -->
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
-
-  <script>
-    // Inicializa Firebase com a SDK compat (funciona fora de módulos ES)
-    const firebaseConfig = {
-      apiKey: "AIzaSyAtwvpF7yCEMHkWAdi_IjmLohHKf-NHTdM",
-      authDomain: "nutriplanpro-8b7a6.firebaseapp.com",
-      projectId: "nutriplanpro-8b7a6",
-      storageBucket: "nutriplanpro-8b7a6.firebasestorage.app",
-      messagingSenderId: "648475954723",
-      appId: "1:648475954723:web:e464c7d9568f9a3284eb96"
-    };
-    firebase.initializeApp(firebaseConfig);
-    const __db = firebase.firestore();
-
-    // Adapta a API compat para o formato que o código usa
-    window.FirestoreSDK = {
-      doc: (db, col, docId) => db.collection(col).doc(docId),
-      getDoc: (ref) => ref.get(),
-      setDoc: (ref, data) => ref.set(data),
-      onSnapshot: (ref, cb) => ref.onSnapshot(snap => {
-        // Adapta snap.exists() → snap.exists para compat
-        const adapted = {
-          exists: () => snap.exists,
-          data: () => snap.data()
-        };
-        cb(adapted);
-      }),
-    };
-    window.__firestore__ = __db;
-  </script>
 
   <script type="text/babel">
     const { useState, useMemo, useCallback, useEffect, useRef } = React;
-
-    // ── Firebase — db vem do script compat carregado antes do Babel ──
-    // db é declarado no bloco JSX abaixo, após o Firebase já ter inicializado
-    const FB = {
-      async set(col, docId, data) {
-        if (!db) return;
-        await db.collection(col).doc(docId).set(data);
-      },
-      async get(col, docId) {
-        if (!db) return null;
-        const snap = await db.collection(col).doc(docId).get();
-        return snap.exists ? snap.data() : null;
-      },
-      onSnapshot(col, docId, cb) {
-        if (!db) return () => {};
-        return db.collection(col).doc(docId).onSnapshot(snap => {
-          if (snap.exists) cb(snap.data());
-        });
-      },
-    };
 
 // ─── PALETA E ESTILOS GLOBAIS ─────────────────────────────────────────────────
 const G = {
@@ -983,8 +946,9 @@ const PrintTemplate = ({ patient, targetKcal }) => {
 };
 
 // ─── FIREBASE HELPERS ────────────────────────────────────────────────────────
-// db aponta para o Firestore já inicializado pelo script compat acima
-let db = window.__firestore__;
+// db é preenchido pelo script Firebase que carrega antes do Babel
+let db = window.__nutridb__ || null;
+const setDb = (d) => { db = d; };
 
 const FB = {
   async set(col, docId, data) {
@@ -1509,60 +1473,34 @@ function App() {
   // ── Sincronização em tempo real com Firebase ──
   useEffect(() => {
     const unsubs = [];
+    const tryInit = () => {
+      if (!window.FirestoreSDK || !db) { setTimeout(tryInit, 150); return; }
 
-    const init = async () => {
-      try {
-        // 1. Carrega pacientes — cria documento inicial se não existir
-        const patientsData = await FB.get('nutriplan', 'patients');
-        if (!patientsData || !patientsData.list || patientsData.list.length === 0) {
-          const p = defaultPatient();
-          await FB.set('nutriplan', 'patients', { list: [p] });
-          setPatients([p]);
-          setCurrentId(p.id);
-        } else {
-          setPatients(patientsData.list);
-          setCurrentId(patientsData.list[0]?.id || null);
+      // Escuta pacientes
+      unsubs.push(FB.onSnapshot('nutriplan', 'patients', data => {
+        if (data?.list?.length > 0) {
+          setPatients(data.list);
+          setCurrentId(prev => prev || data.list[0]?.id || null);
         }
-
-        // 2. Carrega alimentos customizados
-        const foodsData = await FB.get('nutriplan', 'customFoods');
-        if (foodsData?.list) setCustomFoods(foodsData.list);
-
-        // 3. App pronto — conecta listeners em tempo real
         setDbReady(true);
+      }));
 
-        unsubs.push(db.collection('nutriplan').doc('patients').onSnapshot(snap => {
-          if (snap.exists) {
-            const d = snap.data();
-            if (d?.list?.length > 0) {
-              setPatients(d.list);
-              setCurrentId(prev => prev || d.list[0]?.id || null);
-            }
-          }
-        }));
-
-        unsubs.push(db.collection('nutriplan').doc('customFoods').onSnapshot(snap => {
-          if (snap.exists) {
-            const d = snap.data();
-            if (d?.list) setCustomFoods(d.list);
-          }
-        }));
-
-      } catch(err) {
-        console.error('Firebase init error:', err);
-        // Mesmo com erro, libera o app com dados padrão
+      // Se não há dados no Firebase ainda, cria registro inicial
+      FB.get('nutriplan', 'patients').then(data => {
+        if (!data || !data.list || data.list.length === 0) {
+          const p = defaultPatient();
+          FB.set('nutriplan', 'patients', { list: [p] });
+          setCurrentId(p.id);
+        }
         setDbReady(true);
-      }
+      });
+
+      // Escuta alimentos customizados
+      unsubs.push(FB.onSnapshot('nutriplan', 'customFoods', data => {
+        if (data?.list) setCustomFoods(data.list);
+      }));
     };
-
-    // Aguarda db estar disponível (já deve estar pois o script compat carrega primeiro)
-    if (db) {
-      init();
-    } else {
-      const t = setInterval(() => { if (db) { clearInterval(t); init(); } }, 100);
-      setTimeout(() => { clearInterval(t); setDbReady(true); }, 5000); // timeout 5s
-    }
-
+    tryInit();
     return () => unsubs.forEach(u => u && u());
   }, []);
 
