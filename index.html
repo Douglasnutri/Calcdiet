@@ -952,21 +952,21 @@ const setDb = (d) => { db = d; };
 
 const FB = {
   async set(col, docId, data) {
+    if (!db) db = window.__nutridb__;
     if (!db) return;
-    const { doc, setDoc } = window.FirestoreSDK;
-    await setDoc(doc(db, col, docId), data);
+    await db.collection(col).doc(docId).set(data);
   },
   async get(col, docId) {
+    if (!db) db = window.__nutridb__;
     if (!db) return null;
-    const { doc, getDoc } = window.FirestoreSDK;
-    const snap = await getDoc(doc(db, col, docId));
-    return snap.exists() ? snap.data() : null;
+    const snap = await db.collection(col).doc(docId).get();
+    return snap.exists ? snap.data() : null;
   },
   onSnapshot(col, docId, cb) {
+    if (!db) db = window.__nutridb__;
     if (!db) return () => {};
-    const { doc, onSnapshot } = window.FirestoreSDK;
-    return onSnapshot(doc(db, col, docId), snap => {
-      if (snap.exists()) cb(snap.data());
+    return db.collection(col).doc(docId).onSnapshot(snap => {
+      if (snap.exists) cb(snap.data());
     });
   },
 };
@@ -1450,6 +1450,121 @@ const FoodManager = ({ customFoods, onCustomFoodsChange }) => {
   );
 };
 
+// ─── COMPONENTE: BARRA DE TEMPLATES FAVORITOS ───────────────────────────────
+const TemplatesBar = ({ templates, hasMeals, onSave, onLoad, onDelete }) => {
+  const [saving, setSaving] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [confirmLoad, setConfirmLoad] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  const handleSave = () => {
+    if (!newName.trim()) return;
+    onSave(newName);
+    setNewName('');
+    setSaving(false);
+  };
+
+  return (
+    <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:14}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:13,fontWeight:700,color:G.text}}>⭐ Cardápios Favoritos</span>
+          <span style={{fontSize:11,color:G.muted}}>{templates.length} salvo(s)</span>
+        </div>
+        {/* Botão salvar favorito */}
+        {hasMeals && !saving && (
+          <button onClick={()=>setSaving(true)}
+            style={{padding:'6px 14px',background:`${G.accent}22`,border:`1px solid ${G.accent}`,
+              borderRadius:8,color:G.accent,fontSize:12,cursor:'pointer',fontWeight:700}}>
+            ⭐ Salvar como favorito
+          </button>
+        )}
+        {saving && (
+          <div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+            <input
+              autoFocus
+              value={newName}
+              onChange={e=>setNewName(e.target.value)}
+              onKeyDown={e=>{if(e.key==='Enter')handleSave();if(e.key==='Escape')setSaving(false);}}
+              placeholder="Nome do template (ex: Base Emagrecimento)"
+              style={{padding:'6px 10px',background:G.panel,border:`1px solid ${G.accent}`,
+                borderRadius:8,color:G.text,fontSize:13,outline:'none',minWidth:220}}
+            />
+            <button onClick={handleSave} disabled={!newName.trim()}
+              style={{padding:'6px 14px',background:G.accent,border:'none',borderRadius:8,
+                color:'#0f1117',fontSize:12,cursor:'pointer',fontWeight:700,
+                opacity:newName.trim()?1:0.4}}>
+              Salvar
+            </button>
+            <button onClick={()=>{setSaving(false);setNewName('');}}
+              style={{padding:'6px 10px',background:'none',border:`1px solid ${G.border}`,
+                borderRadius:8,color:G.muted,fontSize:12,cursor:'pointer'}}>
+              Cancelar
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Lista de templates */}
+      {templates.length > 0 && (
+        <div style={{marginTop:12,display:'flex',gap:8,flexWrap:'wrap'}}>
+          {templates.map(t => (
+            <div key={t.id} style={{display:'flex',alignItems:'center',gap:0,
+              background:G.panel,borderRadius:8,border:`1px solid ${G.border}`,overflow:'hidden'}}>
+              {/* Botão carregar */}
+              {confirmLoad===t.id ? (
+                <div style={{display:'flex',alignItems:'center',gap:6,padding:'6px 10px'}}>
+                  <span style={{fontSize:11,color:G.warn}}>Substituir refeições atuais?</span>
+                  <button onClick={()=>{onLoad(t);setConfirmLoad(null);}}
+                    style={{padding:'3px 10px',background:G.accent,border:'none',borderRadius:5,
+                      color:'#0f1117',fontSize:11,cursor:'pointer',fontWeight:700}}>
+                    Sim
+                  </button>
+                  <button onClick={()=>setConfirmLoad(null)}
+                    style={{padding:'3px 8px',background:'none',border:`1px solid ${G.border}`,
+                      borderRadius:5,color:G.muted,fontSize:11,cursor:'pointer'}}>
+                    Não
+                  </button>
+                </div>
+              ) : (
+                <button onClick={()=>setConfirmLoad(t.id)}
+                  style={{padding:'7px 14px',background:'none',border:'none',
+                    color:G.text,fontSize:12,cursor:'pointer',fontWeight:500,
+                    display:'flex',flexDirection:'column',alignItems:'flex-start',gap:1}}>
+                  <span>⭐ {t.nome}</span>
+                  <span style={{fontSize:10,color:G.muted}}>{t.meals.length} refeições · {t.savedAt}</span>
+                </button>
+              )}
+              {/* Botão deletar */}
+              {confirmDel===t.id ? (
+                <div style={{display:'flex',gap:4,padding:'0 8px',alignItems:'center'}}>
+                  <button onClick={()=>{onDelete(t.id);setConfirmDel(null);}}
+                    style={{padding:'3px 8px',background:G.danger,border:'none',borderRadius:5,
+                      color:'#fff',fontSize:11,cursor:'pointer',fontWeight:700}}>
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <button onClick={()=>setConfirmDel(t.id)}
+                  style={{padding:'7px 8px',background:'none',border:'none',borderLeft:`1px solid ${G.border}`,
+                    color:G.muted,fontSize:12,cursor:'pointer'}}>
+                  🗑
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {templates.length === 0 && (
+        <div style={{marginTop:8,fontSize:12,color:G.muted}}>
+          Monte um plano alimentar e clique em "Salvar como favorito" para criar um template reutilizável.
+        </div>
+      )}
+    </div>
+  );
+};
+
 const defaultPatient = () => ({
   id: Date.now(),
   nome: '', objetivo: '',
@@ -1467,52 +1582,128 @@ function App() {
   const [tab, setTab] = useState('tmb');
   const [showProf, setShowProf] = useState(false);
   const [customFoods, setCustomFoods] = useState([]);
+  const [templates, setTemplates] = useState([]); // cardápios favoritos
   const [syncing, setSyncing] = useState(false);
   const [dbReady, setDbReady] = useState(false);
 
   // ── Sincronização em tempo real com Firebase ──
   useEffect(() => {
     const unsubs = [];
-    const tryInit = () => {
-      if (!window.FirestoreSDK || !db) { setTimeout(tryInit, 150); return; }
 
-      // Escuta pacientes
-      unsubs.push(FB.onSnapshot('nutriplan', 'patients', data => {
-        if (data?.list?.length > 0) {
-          setPatients(data.list);
-          setCurrentId(prev => prev || data.list[0]?.id || null);
-        }
-        setDbReady(true);
-      }));
+    const init = async () => {
+      try {
+        // Garante que db está disponível
+        if (!db) db = window.__nutridb__;
+        if (!db) throw new Error('Firebase não inicializado');
 
-      // Se não há dados no Firebase ainda, cria registro inicial
-      FB.get('nutriplan', 'patients').then(data => {
-        if (!data || !data.list || data.list.length === 0) {
+        // 1. Carrega pacientes
+        const pSnap = await db.collection('nutriplan').doc('patients').get();
+        if (pSnap.exists && pSnap.data()?.list?.length > 0) {
+          const list = pSnap.data().list;
+          setPatients(list);
+          setCurrentId(list[0]?.id || null);
+        } else {
+          // Banco vazio — cria paciente padrão
           const p = defaultPatient();
-          FB.set('nutriplan', 'patients', { list: [p] });
+          await db.collection('nutriplan').doc('patients').set({ list: [p] });
+          setPatients([p]);
           setCurrentId(p.id);
         }
-        setDbReady(true);
-      });
 
-      // Escuta alimentos customizados
-      unsubs.push(FB.onSnapshot('nutriplan', 'customFoods', data => {
-        if (data?.list) setCustomFoods(data.list);
-      }));
+        // 2. Carrega alimentos customizados
+        const fSnap = await db.collection('nutriplan').doc('customFoods').get();
+        if (fSnap.exists && fSnap.data()?.list) {
+          setCustomFoods(fSnap.data().list);
+        }
+
+        // 3. Carrega templates favoritos
+        const tSnap = await db.collection('nutriplan').doc('templates').get();
+        if (tSnap.exists && tSnap.data()?.list) {
+          setTemplates(tSnap.data().list);
+        }
+
+        // 4. Libera o app
+        setDbReady(true);
+
+        // 4. Listeners em tempo real
+        unsubs.push(
+          db.collection('nutriplan').doc('patients').onSnapshot(snap => {
+            if (snap.exists && snap.data()?.list?.length > 0) {
+              const list = snap.data().list;
+              setPatients(list);
+              setCurrentId(prev => prev || list[0]?.id || null);
+            }
+          })
+        );
+        unsubs.push(
+          db.collection('nutriplan').doc('customFoods').onSnapshot(snap => {
+            if (snap.exists && snap.data()?.list) setCustomFoods(snap.data().list);
+          })
+        );
+        unsubs.push(
+          db.collection('nutriplan').doc('templates').onSnapshot(snap => {
+            if (snap.exists && snap.data()?.list) setTemplates(snap.data().list);
+          })
+        );
+
+      } catch (err) {
+        console.error('Erro Firebase:', err);
+        setDbReady(true); // libera mesmo com erro
+      }
     };
-    tryInit();
+
+    init();
     return () => unsubs.forEach(u => u && u());
   }, []);
 
   const fbSave = async (collection, docId, data) => {
     setSyncing(true);
-    try { await FB.set(collection, docId, data); }
+    try {
+      if (!db) db = window.__nutridb__;
+      if (db) await db.collection(collection).doc(docId).set(data);
+    } catch(e) { console.error('fbSave error:', e); }
     finally { setSyncing(false); }
   };
 
   const handleCustomFoodsChange = (foods) => {
     setCustomFoods(foods);
     fbSave('nutriplan', 'customFoods', { list: foods });
+  };
+
+  // Salva o cardápio atual como template favorito
+  const saveTemplate = (nome) => {
+    const t = {
+      id: Date.now(),
+      nome: nome.trim(),
+      meals: JSON.parse(JSON.stringify(patient.meals)), // deep copy
+      rec1: patient.rec1 || '',
+      rec2: patient.rec2 || '',
+      savedAt: new Date().toLocaleDateString('pt-BR'),
+    };
+    const updated = [...templates.filter(x => x.nome !== t.nome), t];
+    setTemplates(updated);
+    fbSave('nutriplan', 'templates', { list: updated });
+  };
+
+  const deleteTemplate = (id) => {
+    const updated = templates.filter(t => t.id !== id);
+    setTemplates(updated);
+    fbSave('nutriplan', 'templates', { list: updated });
+  };
+
+  // Carrega um template: substitui refeições + recomendações, mantém dados do paciente
+  const loadTemplate = (t) => {
+    const freshMeals = t.meals.map(m => ({
+      ...m,
+      id: Date.now() + Math.random(),
+      items: m.items.map(i => ({...i})),
+    }));
+    save({
+      ...patient,
+      meals: freshMeals,
+      rec1: t.rec1 || '',
+      rec2: t.rec2 || '',
+    });
   };
 
   const patient = patients.find(p=>p.id===currentId) || patients[0];
@@ -1739,6 +1930,16 @@ function App() {
         {/* ABA: Plano Alimentar */}
         {tab==='diet' && (
           <div style={{display:'flex',flexDirection:'column',gap:12}}>
+
+            {/* ── BARRA DE TEMPLATES FAVORITOS ── */}
+            <TemplatesBar
+              templates={templates}
+              hasMeals={patient.meals.length > 0}
+              onSave={saveTemplate}
+              onLoad={loadTemplate}
+              onDelete={deleteTemplate}
+            />
+
             <div>
               <label style={{fontSize:11,color:G.muted,fontWeight:500}}>Recomendações iniciais</label>
               <textarea value={patient.rec1||''} onChange={e=>upd('rec1',e.target.value)} rows={3}
