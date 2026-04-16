@@ -376,7 +376,7 @@ const FoodSearch = ({ onAdd, allFoods }) => {
 };
 
 // Tabela de uma refeição
-const MealTable = ({ meal, onChange, onDelete, weight, customFoods }) => {
+const MealTable = ({ meal, onChange, onDelete, onMoveUp, onMoveDown, onToggleCalc, weight, customFoods, isFirst, isLast }) => {
   const allFoods = useMemo(() => [...FOODS_RAW, ...(customFoods||[])], [customFoods]);
   const [name, setName] = useState(meal.nome);
 
@@ -394,13 +394,40 @@ const MealTable = ({ meal, onChange, onDelete, weight, customFoods }) => {
     onChange({...meal, items});
   };
 
+  const ativo = meal.incluirNoCalculo ?? true;
+
   return (
-    <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,marginBottom:12}}>
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:G.panel,borderRadius:'12px 12px 0 0'}}>
+    <div style={{
+      background:G.card, borderRadius:12, marginBottom:12,
+      border: ativo ? `1px solid ${G.border}` : `1px solid #3a3a4a`,
+      opacity: ativo ? 1 : 0.55,
+      transition: 'opacity .25s, border-color .25s',
+    }}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'10px 14px',background:G.panel,borderRadius:'12px 12px 0 0',gap:8}}>
+        {/* Setas de reordenação */}
+        <div style={{display:'flex',flexDirection:'column',gap:2}}>
+          <button onClick={onMoveUp} disabled={isFirst}
+            style={{background:'none',border:'none',color:isFirst?G.border:G.muted,cursor:isFirst?'default':'pointer',
+              fontSize:12,padding:'1px 4px',lineHeight:1}}>▲</button>
+          <button onClick={onMoveDown} disabled={isLast}
+            style={{background:'none',border:'none',color:isLast?G.border:G.muted,cursor:isLast?'default':'pointer',
+              fontSize:12,padding:'1px 4px',lineHeight:1}}>▼</button>
+        </div>
         <input value={name} onChange={e=>{setName(e.target.value);onChange({...meal,nome:e.target.value});}}
           style={{background:'transparent',border:'none',color:G.text,fontSize:14,fontWeight:700,outline:'none',flex:1}}/>
-        <div style={{display:'flex',gap:12,alignItems:'center'}}>
-          <span style={{color:G.accent,fontSize:13,fontWeight:600}}>{totals.kcal.toFixed(0)} kcal</span>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          {/* Toggle calcular no total */}
+          <button onClick={onToggleCalc} title={ativo?'Remover do total':'Incluir no total'}
+            style={{display:'flex',alignItems:'center',gap:5,padding:'3px 9px',borderRadius:6,fontSize:11,
+              border:`1px solid ${ativo ? G.accent : G.border}`,
+              background: ativo ? `${G.accent}18` : 'transparent',
+              color: ativo ? G.accent : G.muted, cursor:'pointer', fontWeight:600, whiteSpace:'nowrap'}}>
+            <span style={{fontSize:13}}>{ativo ? '✓' : '○'}</span>
+            {ativo ? 'No cálculo' : 'Ignorado'}
+          </button>
+          <span style={{color: ativo ? G.accent : G.muted, fontSize:13,fontWeight:600}}>
+            {totals.kcal.toFixed(0)} kcal
+          </span>
           <button onClick={onDelete} style={{background:'none',border:'none',color:G.danger,cursor:'pointer',fontSize:16,padding:0}}>×</button>
         </div>
       </div>
@@ -496,7 +523,7 @@ const Summary = ({ meals, targetKcal, weight }) => {
     const t = {};
     const keys = ['kcal','ptn_a','ptn_v','carb','sat','poli','mono','fibra','ca','mg','mn','p','fe','na','k','cu','zn','vit_a','b1','b2','b6','b3','vit_c','se','vit_d','vit_e','b9'];
     keys.forEach(k => t[k] = 0);
-    meals.forEach(m => m.items.forEach(({food,qtd}) => {
+    meals.filter(m => m.incluirNoCalculo !== false).forEach(m => m.items.forEach(({food,qtd}) => {
       t.kcal += calcKcal(food,qtd);
       keys.filter(k=>k!=='kcal').forEach(k => t[k] += calcNutriente(food,qtd,k));
     }));
@@ -609,7 +636,7 @@ const PrintTemplate = ({ patient, targetKcal }) => {
   const totals = useMemo(() => {
     const t = {kcal:0,ptn_a:0,ptn_v:0,carb:0,sat:0,poli:0,mono:0,fibra:0,
                ca:0,mg:0,fe:0,na:0,k:0,zn:0,vit_a:0,b1:0,b2:0,b6:0,b3:0,vit_c:0,se:0,vit_d:0,vit_e:0,b9:0};
-    patient.meals.forEach(m => m.items.forEach(({food,qtd}) => {
+    patient.meals.filter(m => m.incluirNoCalculo !== false).forEach(m => m.items.forEach(({food,qtd}) => {
       t.kcal += calcKcal(food, qtd);
       Object.keys(t).filter(k=>k!=='kcal').forEach(k => t[k] += calcNutriente(food, qtd, k));
     }));
@@ -852,6 +879,7 @@ const PrintTemplate = ({ patient, targetKcal }) => {
               </thead>
               <tbody>
                 {patient.meals.map((m, mi) => {
+                  const ativo = m.incluirNoCalculo !== false;
                   const mt = {kcal:0,ptn:0,gord:0,carb:0};
                   m.items.forEach(({food,qtd}) => {
                     mt.kcal += calcKcal(food,qtd);
@@ -860,12 +888,14 @@ const PrintTemplate = ({ patient, targetKcal }) => {
                     mt.carb += calcNutriente(food,qtd,'carb');
                   });
                   return (
-                    <tr key={m.id} style={{borderBottom:'1px solid #e0e0e0'}}>
-                      <td style={{padding:'5px 8px'}}>{m.nome}</td>
-                      <td style={{textAlign:'center', padding:'5px 8px'}}>{mt.ptn.toFixed(1)}g</td>
-                      <td style={{textAlign:'center', padding:'5px 8px'}}>{mt.gord.toFixed(1)}g</td>
-                      <td style={{textAlign:'center', padding:'5px 8px'}}>{mt.carb.toFixed(1)}g</td>
-                      <td style={{textAlign:'center', padding:'5px 8px'}}>{mt.kcal.toFixed(0)} Kcal</td>
+                    <tr key={m.id} style={{borderBottom:'1px solid #e0e0e0', opacity: ativo ? 1 : 0.5}}>
+                      <td style={{padding:'5px 8px', color: ativo ? '#000' : '#888'}}>
+                        {m.nome}{!ativo && <span style={{fontSize:'8pt',marginLeft:6,fontStyle:'italic',color:'#aaa'}}>(opção alternativa)</span>}
+                      </td>
+                      <td style={{textAlign:'center', padding:'5px 8px', color: ativo ? '#000' : '#aaa'}}>{ativo ? mt.ptn.toFixed(1)+'g' : '-'}</td>
+                      <td style={{textAlign:'center', padding:'5px 8px', color: ativo ? '#000' : '#aaa'}}>{ativo ? mt.gord.toFixed(1)+'g' : '-'}</td>
+                      <td style={{textAlign:'center', padding:'5px 8px', color: ativo ? '#000' : '#aaa'}}>{ativo ? mt.carb.toFixed(1)+'g' : '-'}</td>
+                      <td style={{textAlign:'center', padding:'5px 8px', color: ativo ? '#000' : '#aaa'}}>{ativo ? mt.kcal.toFixed(0)+' Kcal' : '-'}</td>
                     </tr>
                   );
                 })}
@@ -1725,9 +1755,26 @@ function App() {
 
   const targetKcal = tmb ? tmb[patient.tmb_formula] || tmb.mifflin : 2000;
 
-  const addMeal = () => save({...patient, meals:[...patient.meals, {id:Date.now(),nome:`Refeição ${patient.meals.length+1}`,items:[]}]});
+  const addMeal = () => save({...patient, meals:[...patient.meals, {id:Date.now(),nome:`Refeição ${patient.meals.length+1}`,items:[],incluirNoCalculo:true}]});
   const updateMeal = (m) => save({...patient, meals:patient.meals.map(x=>x.id===m.id?m:x)});
   const deleteMeal = (id) => save({...patient, meals:patient.meals.filter(m=>m.id!==id)});
+
+  const moveMeal = (id, dir) => {
+    const arr = [...patient.meals];
+    const idx = arr.findIndex(m => m.id === id);
+    const newIdx = idx + dir;
+    if (newIdx < 0 || newIdx >= arr.length) return;
+    const [removed] = arr.splice(idx, 1);
+    arr.splice(newIdx, 0, removed);
+    save({...patient, meals: arr});
+  };
+
+  const toggleMealCalc = (id) => {
+    const meals = patient.meals.map(m =>
+      m.id === id ? {...m, incluirNoCalculo: !(m.incluirNoCalculo ?? true)} : m
+    );
+    save({...patient, meals});
+  };
 
   const addPatient = () => {
     const p = defaultPatient();
@@ -1946,8 +1993,20 @@ function App() {
                 placeholder="Orientações para o paciente…"
                 style={{width:'100%',marginTop:4,padding:'10px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none',resize:'vertical',boxSizing:'border-box'}}/>
             </div>
-            {patient.meals.map(m=>(
-              <MealTable key={m.id} meal={m} onChange={updateMeal} onDelete={()=>deleteMeal(m.id)} weight={patient.peso} customFoods={customFoods}/>
+            {patient.meals.map((m, idx)=>(
+              <MealTable
+                key={m.id}
+                meal={m}
+                onChange={updateMeal}
+                onDelete={()=>deleteMeal(m.id)}
+                onMoveUp={()=>moveMeal(m.id,-1)}
+                onMoveDown={()=>moveMeal(m.id,+1)}
+                onToggleCalc={()=>toggleMealCalc(m.id)}
+                isFirst={idx===0}
+                isLast={idx===patient.meals.length-1}
+                weight={patient.peso}
+                customFoods={customFoods}
+              />
             ))}
             <button onClick={addMeal}
               style={{padding:'10px',background:G.card,border:`1px dashed ${G.border}`,borderRadius:10,color:G.muted,cursor:'pointer',fontSize:13,transition:'all .2s'}}>
@@ -1982,15 +2041,20 @@ function App() {
                   </tr></thead>
                   <tbody>
                     {patient.meals.map(m=>{
+                      const ativo = m.incluirNoCalculo !== false;
                       const t = {kcal:0,ptn_a:0,ptn_v:0,carb:0,sat:0,poli:0,mono:0,fibra:0};
                       m.items.forEach(({food,qtd})=>{
                         t.kcal+=calcKcal(food,qtd);
                         ['ptn_a','ptn_v','carb','sat','poli','mono','fibra'].forEach(k=>t[k]+=calcNutriente(food,qtd,k));
                       });
                       return (
-                        <tr key={m.id} style={{borderBottom:`1px solid ${G.border}30`,color:G.text}}>
-                          <td style={{padding:'5px 0'}}>{m.nome}</td>
-                          <td style={{textAlign:'right',color:G.accent,fontWeight:600}}>{t.kcal.toFixed(0)}</td>
+                        <tr key={m.id} style={{borderBottom:`1px solid ${G.border}30`,
+                          color: ativo ? G.text : G.muted, opacity: ativo ? 1 : 0.5}}>
+                          <td style={{padding:'5px 0'}}>
+                            {m.nome}
+                            {!ativo && <span style={{fontSize:10,color:G.muted,marginLeft:6,fontStyle:'italic'}}>(ignorado)</span>}
+                          </td>
+                          <td style={{textAlign:'right',color: ativo ? G.accent : G.muted,fontWeight:600}}>{t.kcal.toFixed(0)}</td>
                           <td style={{textAlign:'right'}}>{t.ptn_a.toFixed(1)}g</td>
                           <td style={{textAlign:'right'}}>{t.ptn_v.toFixed(1)}g</td>
                           <td style={{textAlign:'right'}}>{t.carb.toFixed(1)}g</td>
