@@ -46,8 +46,7 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useMemo, useCallback, useEffect, useRef } = React;
-
+const { useState, useMemo, useCallback, useEffect, useLayoutEffect, useRef } = React;
 // ─── PALETA E ESTILOS GLOBAIS ─────────────────────────────────────────────────
 const G = {
   bg: "#0f1117", panel: "#181c27", card: "#1e2335",
@@ -292,32 +291,27 @@ const pendingSearchFocusRef = useRef(false); // refoca a busca após adicionar
   }, [highlighted]);
 
   const focusSearchInput = useCallback(() => {
-  requestAnimationFrame(() => {
+  const focusOnce = () => {
     const el = inputRef.current;
     if (!el) return;
-    el.focus();
-    el.setSelectionRange(el.value.length, el.value.length);
-  });
+    el.focus({ preventScroll: true });
+    if (document.activeElement === el) {
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  };
+
+  // Tenta focar agora e também após o navegador/React concluírem o ciclo do Enter/Tab.
+  focusOnce();
+  requestAnimationFrame(focusOnce);
+  setTimeout(focusOnce, 0);
+  setTimeout(focusOnce, 80);
 }, []);
 
-useEffect(() => {
+useLayoutEffect(() => {
   if (!pendingSearchFocusRef.current) return;
   pendingSearchFocusRef.current = false;
   focusSearchInput();
 }, [query, sel, qtd, open, focusSearchInput]);
-
-  const choose = (f) => {
-    setSel(f);
-    setQuery(f.nome);
-    setOpen(false);
-    setHigh(-1);
-    const defaultQtd = (f.unidade || f.unidade_base === 'un') ? '1' : '100';
-    setQtd(defaultQtd);
-    // Foca e seleciona tudo no campo de quantidade
-    setTimeout(() => {
-      if (qtdRef.current) { qtdRef.current.focus(); qtdRef.current.select(); }
-    }, 30);
-  };
 
   const add = useCallback(() => {
   if (!sel) return;
@@ -357,12 +351,13 @@ useEffect(() => {
   };
 
   // Enter/Tab no campo de quantidade → adiciona o alimento
-  const handleQtdKey = (e) => {
-    if (e.key === 'Enter' || e.key === 'Tab') {
-      e.preventDefault();
-      if (sel) add();
-    }
-  };
+ const handleQtdKey = (e) => {
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault();
+    e.stopPropagation();
+    if (sel) add();
+  }
+};
 
   return (
     <div ref={wrapRef} style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
