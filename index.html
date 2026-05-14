@@ -136,21 +136,55 @@ const IDR = {
 };
 
 // ─── CÁLCULOS ────────────────────────────────────────────────────────────────
-const calcKcal = (f, g) => {
-  if (f.unidade) {
-    return (f.ptn_a + f.ptn_v + f.carb) * 4 + (f.sat + f.poli + f.mono) * 9;
+// ─── CÁLCULO DE NUTRIENTES ────────────────────────────────────────────────────
+// Suporta três modos:
+//  1. unidade_base === 'un' + peso_por_unidade  → converte unidades em gramas antes do cálculo
+//  2. unidade: true (legado)                    → valores já são por unidade (sem conversão)
+//  3. padrão (g ou ml)                          → fator = qtd / 100
+
+const resolverFator = (f, qtd) => {
+  // Novo padrão: unidade_base + peso_por_unidade
+  if (f.unidade_base === 'un' && f.peso_por_unidade) {
+    // qtd = número de unidades; converte para gramas primeiro
+    const gramas = qtd * f.peso_por_unidade;
+    return gramas / 100;
   }
-  const fator = g / 100;
-  return ((f.ptn_a + f.ptn_v + f.carb) * 4 + (f.sat + f.poli + f.mono) * 9) * fator;
+  // Legado: unidade:true → valores já são por unidade inteira, não escalar
+  if (f.unidade) return 1;
+  // Padrão: gramas ou ml
+  return qtd / 100;
 };
 
-const calcNutriente = (f, g, key) => {
-  if (f.unidade) return (f[key] || 0);
-  return (f[key] || 0) * (g / 100);
+const calcKcal = (f, qtd) => {
+  const fator = resolverFator(f, qtd);
+  return ((f.ptn_a||0) + (f.ptn_v||0) + (f.carb||0)) * 4 * fator
+       + ((f.sat||0) + (f.poli||0) + (f.mono||0)) * 9 * fator;
+};
+
+const calcNutriente = (f, qtd, key) => {
+  const fator = resolverFator(f, qtd);
+  return (f[key] || 0) * fator;
+};
+
+// Calcula idade em anos a partir de uma data no formato YYYY-MM-DD
+const calcIdade = (dataNasc) => {
+  if (!dataNasc) return 0;
+  // Extrai partes direto da string para evitar problema de fuso horário
+  const partes = dataNasc.split('-');
+  if (partes.length < 3) return 0;
+  const hoje = new Date();
+  const anoNasc = parseInt(partes[0], 10);
+  const mesNasc = parseInt(partes[1], 10) - 1; // 0-indexed
+  const diaNasc = parseInt(partes[2], 10);
+  let idade = hoje.getFullYear() - anoNasc;
+  const m = hoje.getMonth() - mesNasc;
+  if (m < 0 || (m === 0 && hoje.getDate() < diaNasc)) idade--;
+  return Math.max(0, idade);
 };
 
 const calcTMB = (p) => {
-  const { peso, altura, idade, sexo, gordura, fa } = p;
+  const { peso, altura, dataNasc, sexo, gordura, fa } = p;
+  const idade = calcIdade(dataNasc);
   const mlg = peso * (1 - gordura / 100);
   let harris, mifflin, tinsley_p, tinsley_mlg, cunningham;
   if (sexo === 'M') {
@@ -194,7 +228,31 @@ const Badge = ({ v, max, label, unit }) => {
 };
 
 // Autocomplete de alimentos
-const FoodSearch = ({ onAdd, allFoods }) => {
+// Input de quantidade com estado local — evita perda de foco a cada tecla
+const QtyInput = ({ value, onCommit }) => {
+  const [local, setLocal] = useState(String(value ?? ''));
+  useEffect(() => { setLocal(String(value ?? '')); }, [value]);
+  return (
+    <input
+      type="number" min="0" step="any"
+      value={local}
+      onChange={e => setLocal(e.target.value)}
+      onBlur={() => {
+        const val = parseFloat(local);
+        if (!isNaN(val) && val >= 0 && val !== value) onCommit(val);
+        else setLocal(String(value ?? ''));
+      }}
+      onKeyDown={e => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+      }}
+      style={{width:54,padding:'3px 6px',background:G.panel,
+        border:`1px solid ${G.border}`,borderRadius:6,
+        color:G.text,fontSize:12,outline:'none',textAlign:'right'}}
+    />
+  );
+};
+
+const FoodSearch = React.memo(({ onAdd, allFoods }) => {
   const foodList = allFoods || FOODS_RAW;
   const [query, setQuery]       = useState('');
   const [open, setOpen]         = useState(false);
@@ -237,7 +295,7 @@ const FoodSearch = ({ onAdd, allFoods }) => {
     setQuery(f.nome);
     setOpen(false);
     setHigh(-1);
-    const defaultQtd = f.unidade ? '1' : '100';
+    const defaultQtd = (f.unidade || f.unidade_base === 'un') ? '1' : '100';
     setQtd(defaultQtd);
     // Foca e seleciona tudo no campo de quantidade
     setTimeout(() => {
@@ -245,13 +303,25 @@ const FoodSearch = ({ onAdd, allFoods }) => {
     }, 30);
   };
 
-  const add = () => {
-    if (!sel || !qtd) return;
-    onAdd({ food: sel, qtd: parseFloat(qtd) });
+  const add = useCallback(() => {
+    if (!sel) return;
+    const parsedQtd = parseFloat(qtd) || (sel.unidade || sel.unidade_base === 'un' ? 1 : 100);
+    // Guarda ref do input ANTES de qualquer mudança de estado
+    const inputEl = inputRef.current;
+    // Chama onAdd (estável graças ao useCallback+refs no MealTable)
+    onAdd({ food: sel, qtd: parsedQtd });
+    // Limpa estado local
     setQuery(''); setSel(null); setQtd(''); setOpen(false); setHigh(-1);
-    // Devolve foco para o campo de busca
-    setTimeout(() => inputRef.current?.focus(), 30);
-  };
+    // Devolve foco: tenta imediatamente e como fallback após 3 frames
+    if (inputEl) {
+      inputEl.focus();
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => { inputEl.focus(); });
+        });
+      });
+    }
+  }, [sel, qtd, onAdd]);
 
   // Navegação por teclado no input de busca
   const handleSearchKey = (e) => {
@@ -282,10 +352,8 @@ const FoodSearch = ({ onAdd, allFoods }) => {
   // Enter/Tab no campo de quantidade → adiciona o alimento
   const handleQtdKey = (e) => {
     if (e.key === 'Enter' || e.key === 'Tab') {
-      if (sel && qtd) {
-        e.preventDefault();
-        add();
-      }
+      e.preventDefault();
+      if (sel) add();
     }
   };
 
@@ -356,7 +424,7 @@ const FoodSearch = ({ onAdd, allFoods }) => {
             border:`1px solid ${G.border}`,borderRadius:8,
             color:G.text,fontSize:13,outline:'none'}}
         />
-        <span style={{color:G.muted,fontSize:12,minWidth:16}}>{sel?.unidade ? 'un.' : 'g'}</span>
+        <span style={{color:G.muted,fontSize:12,minWidth:16}}>{(sel?.unidade||sel?.unidade_base==='un') ? 'un.' : (sel?.unidade_base||'g')}</span>
       </div>
 
       {/* ── Botão adicionar ── */}
@@ -373,12 +441,27 @@ const FoodSearch = ({ onAdd, allFoods }) => {
       </button>
     </div>
   );
-};
+});
 
 // Tabela de uma refeição
 const MealTable = ({ meal, onChange, onDelete, onMoveUp, onMoveDown, onToggleCalc, weight, customFoods, isFirst, isLast }) => {
   const allFoods = useMemo(() => [...FOODS_RAW, ...(customFoods||[])], [customFoods]);
   const [name, setName] = useState(meal.nome);
+
+  // Refs sempre atualizadas mas sem disparar re-render —
+  // isso permite que handleAddItem tenha referência estável ([] deps)
+  // enquanto ainda acessa o meal e onChange mais recentes.
+  const mealRef     = useRef(meal);
+  const onChangeRef = useRef(onChange);
+  useEffect(() => { mealRef.current = meal; },     [meal]);
+  useEffect(() => { onChangeRef.current = onChange; }, [onChange]);
+
+  // Referência ESTÁVEL — nunca muda, então React.memo do FoodSearch
+  // não re-renderiza após adicionar um alimento.
+  const handleAddItem = useCallback((item) => {
+    const m = mealRef.current;
+    onChangeRef.current({...m, items:[...m.items, item]});
+  }, []); // [] = nunca recria
 
   const totals = useMemo(() => {
     const t = {kcal:0,ptn_a:0,ptn_v:0,carb:0,sat:0,poli:0,mono:0,fibra:0};
@@ -432,7 +515,7 @@ const MealTable = ({ meal, onChange, onDelete, onMoveUp, onMoveDown, onToggleCal
         </div>
       </div>
       <div style={{padding:'10px 14px',position:'relative'}}>
-        <FoodSearch onAdd={item=>onChange({...meal,items:[...meal.items,item]})} allFoods={allFoods}/>
+        <FoodSearch onAdd={handleAddItem} allFoods={allFoods}/>
         {meal.items.length > 0 && (
           <table style={{width:'100%',marginTop:12,borderCollapse:'collapse',fontSize:12}}>
             <thead>
@@ -472,20 +555,14 @@ const MealTable = ({ meal, onChange, onDelete, onMoveUp, onMoveDown, onToggleCal
                     </td>
                     <td style={{textAlign:'right',padding:'4px 6px',verticalAlign:'top'}}>
                       <div style={{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:3}}>
-                        <input
-                          type="number" min="0" step="1"
+                        <QtyInput
                           value={item.qtd}
-                          onChange={e => {
-                            const val = parseFloat(e.target.value);
-                            if (isNaN(val) || val < 0) return;
+                          onCommit={val => {
                             const items = meal.items.map((it,idx) => idx===i ? {...it, qtd: val} : it);
                             onChange({...meal, items});
                           }}
-                          style={{width:54,padding:'3px 6px',background:G.panel,
-                            border:`1px solid ${G.border}`,borderRadius:6,
-                            color:G.text,fontSize:12,outline:'none',textAlign:'right'}}
                         />
-                        <span style={{color:G.muted,fontSize:11}}>{item.food.unidade?'un.':'g'}</span>
+                        <span style={{color:G.muted,fontSize:11}}>{(item.food.unidade||item.food.unidade_base==='un')?'un.':(item.food.unidade_base||'g')}</span>
                       </div>
                     </td>
                     <td style={{textAlign:'right',padding:'5px 6px',color:G.accent,verticalAlign:'top'}}>{k.toFixed(0)}</td>
@@ -653,7 +730,7 @@ const PrintTemplate = ({ patient, targetKcal }) => {
     win.document.write(`
       <!DOCTYPE html><html><head>
       <meta charset="UTF-8">
-      <title>Plano Alimentar - ${patient.nome || 'Paciente'}</title>
+      <title>${patient.nomeCardapio || patient.objetivo || 'Plano Alimentar'} - ${patient.nome || 'Paciente'}</title>
       <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: Arial, sans-serif; font-size: 10pt; color: #000; background: #fff; }
@@ -745,26 +822,33 @@ const PrintTemplate = ({ patient, targetKcal }) => {
 
         {/* ══ CABEÇALHO: logo à esquerda, dados profissional à direita ══ */}
         <div style={{display:'flex', justifyContent:'space-between', alignItems:'center',
-          padding:'16px 24px', borderBottom:'2px solid #e0e0e0'}}>
+          padding:'18px 10%', borderBottom:'2px solid #e0e0e0'}}>
           {/* Logo */}
-          <div style={{minWidth:120}}>
+          <div style={{minWidth:100}}>
             {logo ? (
               <img src={logo} alt="logo" style={{maxHeight:64,maxWidth:160,objectFit:'contain'}}/>
             ) : (
-              <div style={{width:120,height:48,background:'#f5f5f5',borderRadius:4,
+              <div style={{width:90,height:44,background:'#f5f5f5',borderRadius:4,
                 display:'flex',alignItems:'center',justifyContent:'center',
                 color:'#bbb',fontSize:'9pt'}}>sem logo</div>
             )}
           </div>
           {/* Dados profissional */}
-          <div style={{textAlign:'right', fontSize:'9.5pt', color:'#333', lineHeight:1.6}}>
-            {patient.profissional.nome && <div style={{fontWeight:'bold'}}>{patient.profissional.nome}</div>}
-            {patient.profissional.crn && <div>CRN {patient.profissional.crn}</div>}
-            {patient.profissional.contato && <div>{patient.profissional.contato}</div>}
+          <div style={{textAlign:'right', fontSize:'9.5pt', color:'#333', lineHeight:1.8}}>
+            {patient.profissional.nome && (
+              <div style={{fontWeight:'bold', fontSize:'11pt'}}>{patient.profissional.nome}</div>
+            )}
+            {patient.profissional.crn && <div style={{color:'#555'}}>CRN {patient.profissional.crn}</div>}
+            {patient.profissional.contato && <div style={{color:'#555'}}>{patient.profissional.contato}</div>}
+            {patient.profissional.instagram && (
+              <div style={{color:'#555'}}>
+                @{patient.profissional.instagram.replace('@','')}
+              </div>
+            )}
           </div>
         </div>
 
-        <div style={{padding:'20px 24px'}}>
+        <div style={{padding:'24px 10%'}}>
 
           {/* ══ NOME DO PACIENTE ══ */}
           <div style={{textAlign:'center', marginBottom:patient.objetivo ? 4 : 16}}>
@@ -773,10 +857,12 @@ const PrintTemplate = ({ patient, targetKcal }) => {
             </div>
           </div>
 
-          {/* ══ TÍTULO: objetivo centralizado ══ */}
-          {patient.objetivo && (
+          {/* ══ TÍTULO: nome do cardápio (ou objetivo como fallback) ══ */}
+          {(patient.nomeCardapio || patient.objetivo) && (
             <div style={{textAlign:'center', marginBottom:16}}>
-              <div style={{fontWeight:'bold', fontSize:'12pt', color:'#444'}}>{patient.objetivo}</div>
+              <div style={{fontWeight:'bold', fontSize:'12pt', color:'#444'}}>
+                {patient.nomeCardapio || patient.objetivo}
+              </div>
               <div style={{fontSize:'9.5pt', color:'#777'}}>Planejamento alimentar</div>
             </div>
           )}
@@ -822,7 +908,7 @@ const PrintTemplate = ({ patient, targetKcal }) => {
                         </td>
                         <td style={{padding:'5px 10px', color:'#444',
                           background: idx % 2 === 0 ? '#fff' : '#fafafa'}}>
-                          {qtd}{food.unidade ? 'un.' : 'g'}
+                          {qtd}{(food.unidade||food.unidade_base==='un') ? 'un.' : (food.unidade_base||'g')}
                         </td>
                       </tr>
                     ))}
@@ -860,9 +946,9 @@ const PrintTemplate = ({ patient, targetKcal }) => {
             <div style={{textAlign:'center', fontWeight:'bold', fontSize:'11pt', marginBottom:6}}>
               Relatório de nutrientes
             </div>
-            {patient.objetivo && (
+            {(patient.nomeCardapio || patient.objetivo) && (
               <div style={{textAlign:'center', fontSize:'9pt', color:'#555', marginBottom:10}}>
-                {patient.objetivo}
+                {patient.nomeCardapio || patient.objetivo}
               </div>
             )}
 
@@ -956,17 +1042,24 @@ const PrintTemplate = ({ patient, targetKcal }) => {
         </div>{/* fim padding wrapper */}
 
         {/* ══ RODAPÉ ══ */}
-        <div style={{borderTop:'2px solid #e0e0e0', padding:'10px 24px',
+        <div style={{borderTop:'2px solid #e0e0e0', padding:'14px 10%',
           display:'flex', justifyContent:'space-between', alignItems:'center',
-          background:'#fafafa', fontSize:'9pt', color:'#555'}}>
-          <div>
+          background:'#fafafa', fontSize:'9pt', color:'#555', gap:16}}>
+          {/* Esquerda: nome */}
+          <div style={{lineHeight:1.7}}>
             {patient.profissional.nome && (
-              <span style={{fontWeight:'bold'}}>Nutricionista {patient.profissional.nome}</span>
+              <div style={{fontWeight:'bold', fontSize:'10pt', color:'#333'}}>
+                Nutricionista {patient.profissional.nome}
+              </div>
             )}
-          </div>
-          <div style={{textAlign:'right', lineHeight:1.6}}>
             {patient.profissional.crn && <div>CRN {patient.profissional.crn}</div>}
+          </div>
+          {/* Direita: contato + instagram */}
+          <div style={{textAlign:'right', lineHeight:1.7}}>
             {patient.profissional.contato && <div>{patient.profissional.contato}</div>}
+            {patient.profissional.instagram && (
+              <div>@{patient.profissional.instagram.replace('@','')}</div>
+            )}
           </div>
         </div>
 
@@ -980,7 +1073,15 @@ const PrintTemplate = ({ patient, targetKcal }) => {
 let db = window.__nutridb__ || null;
 const setDb = (d) => { db = d; };
 
+// Converte nome para snake_case — ID dos documentos do Firestore
+const toDocId = (nome) =>
+  nome.trim().toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '');
+
 const FB = {
+  // ── Operações genéricas ──
   async set(col, docId, data) {
     if (!db) db = window.__nutridb__;
     if (!db) return;
@@ -999,11 +1100,172 @@ const FB = {
       if (snap.exists) cb(snap.data());
     });
   },
+
+  // ── alimentos_db: documentos individuais por alimento ──
+  async salvarAlimento(food) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return;
+    const id = toDocId(food.nome);
+    await db.collection('alimentos_db').doc(id).set({ ...food, _id: id });
+    return id;
+  },
+  async excluirAlimento(nome) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return;
+    await db.collection('alimentos_db').doc(toDocId(nome)).delete();
+  },
+  async listarAlimentos() {
+    if (!db) db = window.__nutridb__;
+    if (!db) return [];
+    const snap = await db.collection('alimentos_db').get();
+    return snap.docs.map(d => ({ ...d.data(), _docId: d.id }));
+  },
+  onAlimentosSnapshot(cb) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return () => {};
+    return db.collection('alimentos_db').onSnapshot(snap => {
+      cb(snap.docs.map(d => ({ ...d.data(), _docId: d.id })));
+    });
+  },
+  async buscarAlimentoPorNome(nome) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return null;
+    const snap = await db.collection('alimentos_db')
+      .where('nome', '==', nome).limit(1).get();
+    if (snap.empty) return null;
+    return { ...snap.docs[0].data(), _docId: snap.docs[0].id };
+  },
+
+  // ── pacientes: coleção individual ──
+  async salvarPaciente(patient) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return;
+    const id = String(patient.id);
+    await db.collection('pacientes').doc(id).set(patient);
+  },
+  async excluirPaciente(id) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return;
+    await db.collection('pacientes').doc(String(id)).delete();
+  },
+  async listarPacientes() {
+    if (!db) db = window.__nutridb__;
+    if (!db) return [];
+    const snap = await db.collection('pacientes').orderBy('nome').get();
+    return snap.docs.map(d => d.data());
+  },
+  onPacientesSnapshot(cb) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return () => {};
+    return db.collection('pacientes').onSnapshot(snap => {
+      cb(snap.docs.map(d => d.data()));
+    });
+  },
+
+  // ── favoritos: templates de cardápio ──
+  async salvarTemplate(template) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return;
+    const id = toDocId(template.nome) + '_' + template.id;
+    await db.collection('favoritos').doc(id).set({ ...template, _docId: id });
+    return id;
+  },
+  async excluirTemplate(docId) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return;
+    await db.collection('favoritos').doc(docId).delete();
+  },
+  onFavoritosSnapshot(cb) {
+    if (!db) db = window.__nutridb__;
+    if (!db) return () => {};
+    return db.collection('favoritos').onSnapshot(snap => {
+      cb(snap.docs.map(d => d.data()));
+    });
+  },
+  async listarFavoritos() {
+    if (!db) db = window.__nutridb__;
+    if (!db) return [];
+    const snap = await db.collection('favoritos').get();
+    return snap.docs.map(d => d.data());
+  },
+};
+
+// ─── SCRIPT DE MIGRAÇÃO (disponível via console: window.rodarMigracao()) ─────
+window.rodarMigracao = async () => {
+  console.log('Iniciando migração...');
+  try {
+    if (!db) db = window.__nutridb__;
+
+    // ── Migra alimentos de nutriplan/customFoods → alimentos_db ──
+    const foodsSnap = await db.collection('nutriplan').doc('customFoods').get();
+    let alimentosMigrados = 0;
+    if (foodsSnap.exists && foodsSnap.data()?.list) {
+      const batch = db.batch();
+      for (const food of foodsSnap.data().list) {
+        const id = toDocId(food.nome);
+        const ref = db.collection('alimentos_db').doc(id);
+        batch.set(ref, {
+          nome:            food.nome,
+          unidade_base:    food.unidade_base    || (food.unidade ? 'un' : 'g'),
+          peso_referencia: food.peso_por_unidade || 100,
+          ptn_a:  food.ptn_a  || 0,  ptn_v: food.ptn_v || 0,
+          carb:   food.carb   || 0,  sat:   food.sat   || 0,
+          poli:   food.poli   || 0,  mono:  food.mono  || 0,
+          fibra:  food.fibra  || 0,  ca:    food.ca    || 0,
+          mg:     food.mg     || 0,  fe:    food.fe    || 0,
+          na:     food.na     || 0,  k:     food.k     || 0,
+          zn:     food.zn     || 0,  vit_a: food.vit_a || 0,
+          b1:     food.b1     || 0,  b2:    food.b2    || 0,
+          b6:     food.b6     || 0,  b3:    food.b3    || 0,
+          vit_c:  food.vit_c  || 0,  se:    food.se    || 0,
+          vit_d:  food.vit_d  || 0,  vit_e: food.vit_e || 0,
+          b9:     food.b9     || 0,  _docId: id,
+        });
+        alimentosMigrados++;
+      }
+      await batch.commit();
+    }
+
+    // ── Migra pacientes de nutriplan/patients → coleção pacientes ──
+    const pSnap = await db.collection('nutriplan').doc('patients').get();
+    let pacientesMigrados = 0;
+    if (pSnap.exists && pSnap.data()?.list) {
+      const batch = db.batch();
+      for (const p of pSnap.data().list) {
+        batch.set(db.collection('pacientes').doc(String(p.id)), p);
+        pacientesMigrados++;
+      }
+      await batch.commit();
+    }
+
+    // ── Migra templates de nutriplan/templates → coleção favoritos ──
+    const tSnap = await db.collection('nutriplan').doc('templates').get();
+    let templatesMigrados = 0;
+    if (tSnap.exists && tSnap.data()?.list) {
+      const batch = db.batch();
+      for (const t of tSnap.data().list) {
+        const id = toDocId(t.nome) + '_' + t.id;
+        batch.set(db.collection('favoritos').doc(id), { ...t, _docId: id });
+        templatesMigrados++;
+      }
+      await batch.commit();
+    }
+
+    const msg = `Migração concluída!\n• ${alimentosMigrados} alimentos → alimentos_db\n• ${pacientesMigrados} pacientes → pacientes\n• ${templatesMigrados} templates → favoritos`;
+    console.log(msg);
+    alert(msg);
+  } catch (err) {
+    console.error('Erro na migração:', err);
+    alert('Erro: ' + err.message);
+  }
 };
 
 // ─── COMPONENTE: GERENCIADOR DE ALIMENTOS ────────────────────────────────────
 const EMPTY_FOOD = () => ({
-  nome:'', medida:'g', ptn_a:0, ptn_v:0, carb:0, sat:0, poli:0, mono:0,
+  nome:'', medida:'g',
+  unidade_base:'g',       // 'g' | 'un' | 'ml'
+  peso_por_unidade:100,   // gramas por unidade (só relevante quando unidade_base='un')
+  ptn_a:0, ptn_v:0, carb:0, sat:0, poli:0, mono:0,
   fibra:0, ca:0, mg:0, mn:0, p:0, fe:0, na:0, k:0, cu:0, zn:0,
   vit_a:0, b1:0, b2:0, b6:0, b3:0, vit_c:0, se:0, vit_d:0, vit_e:0, b9:0,
 });
@@ -1081,11 +1343,23 @@ const FoodManager = ({ customFoods, onCustomFoodsChange }) => {
 
     let updated;
     if (editIdx !== null) {
-      updated = customFoods.map((f,i) => i===editIdx ? food : f);
+      const old = customFoods[editIdx];
+      // Se nome mudou, excluir o documento antigo
+      if (old?.nome && old.nome !== food.nome) {
+        onCustomFoodsChange(
+          customFoods.map((f,i) => i===editIdx ? food : f),
+          { added: food, removed: old.nome }
+        );
+      } else {
+        onCustomFoodsChange(
+          customFoods.map((f,i) => i===editIdx ? food : f),
+          { added: food }
+        );
+      }
     } else {
       updated = [...customFoods, food];
+      onCustomFoodsChange(updated, { added: food });
     }
-    onCustomFoodsChange(updated);
     setForm(EMPTY_FOOD());
     setEditIdx(null);
     setMode('list');
@@ -1098,7 +1372,8 @@ const FoodManager = ({ customFoods, onCustomFoodsChange }) => {
   };
 
   const deleteFood = (idx) => {
-    onCustomFoodsChange(customFoods.filter((_,i) => i!==idx));
+    const food = customFoods[idx];
+    onCustomFoodsChange(customFoods.filter((_,i) => i!==idx), { removed: food?.nome });
     setDeleteConfirm(null);
   };
 
@@ -1197,7 +1472,7 @@ const FoodManager = ({ customFoods, onCustomFoodsChange }) => {
       });
 
       if (toAdd.length > 0) {
-        onCustomFoodsChange([...customFoods, ...toAdd]);
+        onCustomFoodsChange([...customFoods, ...toAdd], { batchAdd: toAdd });
       }
 
       // Monta mensagem de resultado
@@ -1218,8 +1493,12 @@ const FoodManager = ({ customFoods, onCustomFoodsChange }) => {
 
   const [confirmClear, setConfirmClear] = useState(false);
 
-  const clearAll = () => {
-    onCustomFoodsChange([]);
+  const clearAll = async () => {
+    // Exclui cada documento individualmente no alimentos_db
+    for (const f of customFoods) {
+      await FB.excluirAlimento(f.nome).catch(()=>{});
+    }
+    onCustomFoodsChange([], {});
     setConfirmClear(false);
     setMode('list');
   };
@@ -1319,9 +1598,30 @@ const FoodManager = ({ customFoods, onCustomFoodsChange }) => {
             {/* Campos principais */}
             <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10}}>
               {inpF('nome')}
-              {inpF('medida')}
+              <div style={{display:'flex',flexDirection:'column',gap:3,flex:'1 1 140px'}}>
+                <label style={{fontSize:11,color:G.muted}}>Unidade base <span style={{color:G.danger}}>*</span></label>
+                <select value={form.unidade_base||'g'}
+                  onChange={e=>setForm(prev=>({...prev,unidade_base:e.target.value}))}
+                  style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none'}}>
+                  <option value="g">g — Gramas</option>
+                  <option value="un">un — Unidade</option>
+                  <option value="ml">ml — Mililitros</option>
+                </select>
+              </div>
+              {form.unidade_base==='un' && (
+                <div style={{display:'flex',flexDirection:'column',gap:3,flex:'1 1 140px'}}>
+                  <label style={{fontSize:11,color:G.muted}}>Peso por unidade (g)</label>
+                  <input type="number" step="0.1" value={form.peso_por_unidade||100}
+                    onChange={e=>setForm(prev=>({...prev,peso_por_unidade:parseFloat(e.target.value)||100}))}
+                    style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none'}}/>
+                  <span style={{fontSize:10,color:G.muted}}>Ex: ovo ≈ 50g por unidade</span>
+                </div>
+              )}
             </div>
-            <div style={{fontWeight:600,fontSize:11,color:G.muted,marginBottom:8,marginTop:4}}>MACRONUTRIENTES — valores por 100g (ou por unidade se medida ≠ g)</div>
+            <div style={{fontWeight:600,fontSize:11,color:G.muted,marginBottom:8,marginTop:4}}>
+              MACRONUTRIENTES — valores sempre por 100g
+              {form.unidade_base==='un' && <span style={{color:G.warn,marginLeft:6}}>⚠ informe por 100g, não por unidade</span>}
+            </div>
             <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10}}>
               {inpF('ptn_a')}{inpF('ptn_v')}{inpF('carb')}
               {inpF('sat')}{inpF('poli')}{inpF('mono')}{inpF('fibra')}
@@ -1595,13 +1895,272 @@ const TemplatesBar = ({ templates, hasMeals, onSave, onLoad, onDelete }) => {
   );
 };
 
+
+// ─── CARD DE RESUMO (com suporte a aniversariantes clicáveis) ───────────────
+const AniversariantesCard = ({ card: c, onSelectPatient }) => {
+  const [open, setOpen] = useState(false);
+  const hasAniv = c.aniversariantes?.length > 0;
+
+  return (
+    <div style={{position:'relative'}}>
+      <div
+        onClick={() => hasAniv && setOpen(o => !o)}
+        style={{background:G.card,borderRadius:12,border:`1px solid ${open ? c.color : G.border}`,
+          padding:16,display:'flex',flexDirection:'column',gap:6,
+          cursor: hasAniv ? 'pointer' : 'default',
+          transition:'border-color .2s',
+        }}>
+        <span style={{fontSize:22}}>{c.icon}</span>
+        <div style={{fontSize:22,fontWeight:900,color:c.color}}>{c.value}</div>
+        <div style={{fontSize:11,color:G.muted,display:'flex',alignItems:'center',gap:4}}>
+          {c.label}
+          {hasAniv && <span style={{color:c.color,fontSize:13}}>▾</span>}
+        </div>
+      </div>
+
+      {/* Dropdown com nomes dos aniversariantes */}
+      {open && hasAniv && (
+        <div style={{
+          position:'absolute',top:'100%',left:0,right:0,zIndex:50,
+          background:G.panel,border:`1px solid ${c.color}`,borderRadius:10,
+          boxShadow:'0 8px 32px #00000066',marginTop:4,overflow:'hidden',
+        }}>
+          {c.aniversariantes.map(p => (
+            <div key={p.id}
+              onClick={() => { onSelectPatient(p.id); setOpen(false); }}
+              style={{padding:'9px 14px',cursor:'pointer',fontSize:13,color:G.text,
+                borderBottom:`1px solid ${G.border}30`,display:'flex',alignItems:'center',gap:8}}
+              onMouseEnter={e=>e.currentTarget.style.background=G.card}
+              onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+              <span style={{fontSize:16}}>🎂</span>
+              <div>
+                <div style={{fontWeight:600}}>{p.nome || 'Sem nome'}</div>
+                <div style={{fontSize:11,color:G.muted}}>
+                  {calcIdade(p.dataNasc)} anos hoje
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── COMPONENTE: DASHBOARD ───────────────────────────────────────────────────
+const Dashboard = ({ patients, onSelectPatient, onAddPatient }) => {
+  const [search, setSearch] = useState('');
+
+  // ── Estatísticas ──────────────────────────────────────────────────────────
+  const stats = useMemo(() => {
+    const total = patients.length;
+    const comIdade = patients.filter(p => p.dataNasc && calcIdade(p.dataNasc) > 0);
+    const mediaIdade = comIdade.length
+      ? Math.round(comIdade.reduce((s,p) => s + calcIdade(p.dataNasc), 0) / comIdade.length)
+      : null;
+
+    const hoje = new Date();
+    const diaHoje = hoje.getDate();
+    const mesHoje = hoje.getMonth() + 1;
+    const aniversariantes = patients.filter(p => {
+      if (!p.dataNasc) return false;
+      const partes = p.dataNasc.split('-');
+      if (partes.length < 3) return false;
+      return parseInt(partes[2],10) === diaHoje && parseInt(partes[1],10) === mesHoje;
+    });
+
+    const classify = (obj='') => {
+      const o = obj.toLowerCase();
+      if (/emagrec|perda|peso|deficit|cut/.test(o)) return 'emagrecimento';
+      if (/hipertrofia|musculo|massa|ganho|bulk|perform|atleta/.test(o)) return 'hipertrofia';
+      return 'outro';
+    };
+    const grupos = {emagrecimento:0, hipertrofia:0, outro:0};
+    patients.forEach(p => { grupos[classify(p.objetivo)]++; });
+
+    return { total, mediaIdade, aniversariantes, grupos };
+  }, [patients]);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return patients;
+    const q = search.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+    return patients.filter(p => {
+      const n = ((p.nome||'')+(p.objetivo||'')+(p.telefone||'')+(p.instagram||''))
+        .toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+      return n.includes(q);
+    });
+  }, [patients, search]);
+
+  const formatWA = (tel='') => {
+    const digits = (tel||'').replace(/\D/g,'');
+    if (!digits) return null;
+    return digits.startsWith('55') ? digits : '55' + digits;
+  };
+
+  const objetivoColor = (obj='') => {
+    if (/emagrec|perda|peso|cut/i.test(obj)) return {bg:'#f8717122',fg:'#f87171'};
+    if (/hipertrofia|musculo|massa|bulk|perform/i.test(obj)) return {bg:'#60a5fa22',fg:'#60a5fa'};
+    return {bg:`${G.border}44`,fg:G.muted};
+  };
+
+  const objetivoLabels = {
+    emagrecimento: {l:'Emagrecimento', color:'#f87171'},
+    hipertrofia:   {l:'Hipertrofia / Performance', color:'#60a5fa'},
+    outro:         {l:'Outros', color:'#7c85a2'},
+  };
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:20}}>
+
+      {/* ── Botão adicionar paciente ── */}
+      <button onClick={onAddPatient} style={{
+        width:'100%', padding:'14px', borderRadius:12,
+        background:G.grad, border:'none', color:'#0f1117',
+        fontWeight:800, fontSize:15, cursor:'pointer',
+        letterSpacing:'-0.3px', boxShadow:'0 4px 20px #4ade8033',
+        transition:'opacity .15s',
+      }}
+        onMouseEnter={e=>e.currentTarget.style.opacity='0.9'}
+        onMouseLeave={e=>e.currentTarget.style.opacity='1'}>
+        + Adicionar Paciente
+      </button>
+
+      {/* ── Cards de resumo ── */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:10}}>
+        {[
+          {icon:'👥', label:'Total', value: stats.total, color: G.accent},
+          {icon:'🎂', label:'Média de Idade', value: stats.mediaIdade ? stats.mediaIdade+' anos' : '—', color: G.info},
+          {icon:'🎉', label:'Aniversariantes', value: stats.aniversariantes.length, color: G.warn, aniversariantes: stats.aniversariantes},
+          {icon:'🍽', label:'Com plano', value: patients.filter(p=>p.meals?.length>0).length, color:'#a78bfa'},
+        ].map((c,i) => (
+          <AniversariantesCard key={i} card={c} onSelectPatient={onSelectPatient}/>
+        ))}
+      </div>
+
+      {/* ── Distribuição de objetivos (compacto) ── */}
+      <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:14}}>
+        <div style={{fontWeight:700,fontSize:12,color:G.muted,marginBottom:10,textTransform:'uppercase',letterSpacing:'0.5px'}}>Distribuição de objetivos</div>
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          {Object.entries(stats.grupos).map(([key, count]) => {
+            const meta = objetivoLabels[key];
+            const pct = stats.total > 0 ? Math.round(count/stats.total*100) : 0;
+            return (
+              <div key={key} style={{display:'flex',alignItems:'center',gap:10}}>
+                <div style={{width:110,fontSize:12,color:G.muted,flexShrink:0}}>{meta.l}</div>
+                <div style={{flex:1,height:8,background:G.panel,borderRadius:4,overflow:'hidden'}}>
+                  <div style={{height:'100%',width:`${pct}%`,background:meta.color,borderRadius:4,transition:'width .5s',minWidth:count>0?4:0}}/>
+                </div>
+                <div style={{fontSize:12,color:meta.color,fontWeight:600,minWidth:32,textAlign:'right'}}>{count}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Lista de pacientes (cards) ── */}
+      <div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,gap:10}}>
+          <div style={{fontWeight:700,fontSize:13,color:G.text}}>Seus pacientes <span style={{color:G.muted,fontWeight:400,fontSize:12}}>({filtered.length})</span></div>
+          <input value={search} onChange={e=>setSearch(e.target.value)}
+            placeholder="Buscar por nome, objetivo…"
+            style={{padding:'7px 12px',background:G.card,border:`1px solid ${G.border}`,
+              borderRadius:8,color:G.text,fontSize:12,outline:'none',width:210}}/>
+        </div>
+
+        {filtered.length === 0 && (
+          <div style={{padding:'32px',textAlign:'center',color:G.muted,background:G.card,borderRadius:12,border:`1px solid ${G.border}`}}>
+            {search ? 'Nenhum paciente encontrado para essa busca.' : 'Nenhum paciente cadastrado ainda.'}
+          </div>
+        )}
+
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          {filtered.map(p => {
+            const wa = formatWA(p.telefone);
+            const temPlano = p.meals?.length > 0;
+            const cor = objetivoColor(p.objetivo);
+            const isAniv = stats.aniversariantes.some(a => a.id === p.id);
+            return (
+              <div key={p.id}
+                onClick={()=>onSelectPatient(p.id)}
+                style={{
+                  display:'flex', alignItems:'center', gap:14,
+                  background:G.card, borderRadius:12,
+                  border:`1px solid ${G.border}`,
+                  padding:'12px 16px', cursor:'pointer',
+                  transition:'border-color .15s, background .15s',
+                }}
+                onMouseEnter={e=>{e.currentTarget.style.borderColor=G.accent;e.currentTarget.style.background=`${G.accent}08`;}}
+                onMouseLeave={e=>{e.currentTarget.style.borderColor=G.border;e.currentTarget.style.background=G.card;}}>
+
+                {/* Avatar */}
+                <div style={{
+                  width:42, height:42, borderRadius:'50%', flexShrink:0,
+                  background:`linear-gradient(135deg,${G.accent}40,${G.info}40)`,
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                  fontSize:17, fontWeight:900, color:G.accent, position:'relative',
+                }}>
+                  {(p.nome||'?')[0].toUpperCase()}
+                  {isAniv && (
+                    <span style={{position:'absolute',top:-2,right:-2,fontSize:12}}>🎉</span>
+                  )}
+                </div>
+
+                {/* Info principal */}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:13,color:G.text,
+                    whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                    {p.nome || <span style={{color:G.muted,fontStyle:'italic'}}>Sem nome</span>}
+                    {isAniv && <span style={{fontSize:11,color:G.warn,marginLeft:6,fontWeight:400}}>🎂 aniversário hoje!</span>}
+                  </div>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginTop:3,flexWrap:'wrap'}}>
+                    {p.objetivo && (
+                      <span style={{fontSize:11,padding:'1px 7px',borderRadius:8,
+                        background:cor.bg,color:cor.fg,fontWeight:500}}>
+                        {p.objetivo}
+                      </span>
+                    )}
+                    {p.dataNasc && (
+                      <span style={{fontSize:11,color:G.muted}}>{calcIdade(p.dataNasc)} anos</span>
+                    )}
+                    <span style={{fontSize:11,color:temPlano?G.accent:G.muted}}>
+                      {temPlano ? `${p.meals.length} refeições` : 'sem plano'}
+                    </span>
+                  </div>
+                  {p.instagram && (
+                    <div style={{fontSize:10,color:G.muted,marginTop:1}}>@{p.instagram.replace('@','')}</div>
+                  )}
+                </div>
+
+                {/* WhatsApp + seta */}
+                <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}
+                  onClick={e=>e.stopPropagation()}>
+                  {wa && (
+                    <a href={`https://wa.me/${wa}`} target="_blank" rel="noopener noreferrer"
+                      style={{display:'flex',alignItems:'center',gap:4,padding:'5px 10px',
+                        background:'#25d36618',border:'1px solid #25d36644',
+                        borderRadius:8,color:'#25d366',fontSize:11,textDecoration:'none',fontWeight:600}}>
+                      📱
+                    </a>
+                  )}
+                  <span style={{color:G.muted,fontSize:16}}>›</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const defaultPatient = () => ({
   id: Date.now(),
-  nome: '', objetivo: '',
-  peso: 70, altura: 170, idade: 30, sexo: 'M',
+  nome: '', objetivo: '', nomeCardapio: '',
+  peso: 70, altura: 170, dataNasc: '', sexo: 'M',
   gordura: 20, fa: 1.55,
   tmb_formula: 'mifflin',
-  profissional: { nome: '', crn: '', contato: '' },
+  telefone: '', instagram: '',
+  profissional: { nome: '', crn: '', contato: '', instagram: '' },
   meals: [],
   rec1: '', rec2: '',
 });
@@ -1609,7 +2168,7 @@ const defaultPatient = () => ({
 function App() {
   const [patients, setPatients] = useState([defaultPatient()]);
   const [currentId, setCurrentId] = useState(null);
-  const [tab, setTab] = useState('tmb');
+  const [tab, setTab] = useState('dashboard');
   const [showProf, setShowProf] = useState(false);
   const [customFoods, setCustomFoods] = useState([]);
   const [templates, setTemplates] = useState([]); // cardápios favoritos
@@ -1622,63 +2181,49 @@ function App() {
 
     const init = async () => {
       try {
-        // Garante que db está disponível
         if (!db) db = window.__nutridb__;
         if (!db) throw new Error('Firebase não inicializado');
 
-        // 1. Carrega pacientes
-        const pSnap = await db.collection('nutriplan').doc('patients').get();
-        if (pSnap.exists && pSnap.data()?.list?.length > 0) {
-          const list = pSnap.data().list;
-          setPatients(list);
-          setCurrentId(list[0]?.id || null);
+        // ── 1. Carrega pacientes da coleção 'pacientes' ──
+        const lista = await FB.listarPacientes();
+        if (lista.length > 0) {
+          setPatients(lista);
+          setCurrentId(lista[0]?.id || null);
         } else {
           // Banco vazio — cria paciente padrão
           const p = defaultPatient();
-          await db.collection('nutriplan').doc('patients').set({ list: [p] });
+          await FB.salvarPaciente(p);
           setPatients([p]);
           setCurrentId(p.id);
         }
 
-        // 2. Carrega alimentos customizados
-        const fSnap = await db.collection('nutriplan').doc('customFoods').get();
-        if (fSnap.exists && fSnap.data()?.list) {
-          setCustomFoods(fSnap.data().list);
-        }
+        // ── 2. Carrega alimentos customizados da coleção 'alimentos_db' ──
+        const foods = await FB.listarAlimentos();
+        if (foods.length > 0) setCustomFoods(foods);
 
-        // 3. Carrega templates favoritos
-        const tSnap = await db.collection('nutriplan').doc('templates').get();
-        if (tSnap.exists && tSnap.data()?.list) {
-          setTemplates(tSnap.data().list);
-        }
+        // ── 3. Carrega templates favoritos da coleção 'favoritos' ──
+        const favs = await FB.listarFavoritos();
+        if (favs.length > 0) setTemplates(favs);
 
-        // 4. Libera o app
+        // ── 4. Libera o app ──
         setDbReady(true);
 
-        // 4. Listeners em tempo real
-        unsubs.push(
-          db.collection('nutriplan').doc('patients').onSnapshot(snap => {
-            if (snap.exists && snap.data()?.list?.length > 0) {
-              const list = snap.data().list;
-              setPatients(list);
-              setCurrentId(prev => prev || list[0]?.id || null);
-            }
-          })
-        );
-        unsubs.push(
-          db.collection('nutriplan').doc('customFoods').onSnapshot(snap => {
-            if (snap.exists && snap.data()?.list) setCustomFoods(snap.data().list);
-          })
-        );
-        unsubs.push(
-          db.collection('nutriplan').doc('templates').onSnapshot(snap => {
-            if (snap.exists && snap.data()?.list) setTemplates(snap.data().list);
-          })
-        );
+        // ── 5. Listeners em tempo real ──
+        unsubs.push(FB.onPacientesSnapshot(list => {
+          // Ignora update do Firebase se há um save local pendente (usuário digitando).
+          // Quando o timer do save disparar, o Firebase vai confirmar e aí sim atualiza.
+          if (saveTimer.current) return;
+          if (list.length > 0) {
+            setPatients(list);
+            setCurrentId(prev => prev || list[0]?.id || null);
+          }
+        }));
+        unsubs.push(FB.onAlimentosSnapshot(foods => setCustomFoods(foods)));
+        unsubs.push(FB.onFavoritosSnapshot(favs => setTemplates(favs)));
 
       } catch (err) {
         console.error('Erro Firebase:', err);
-        setDbReady(true); // libera mesmo com erro
+        setDbReady(true);
       }
     };
 
@@ -1686,6 +2231,7 @@ function App() {
     return () => unsubs.forEach(u => u && u());
   }, []);
 
+  // fbSave genérico (ainda usado para settings/logo)
   const fbSave = async (collection, docId, data) => {
     setSyncing(true);
     try {
@@ -1695,30 +2241,51 @@ function App() {
     finally { setSyncing(false); }
   };
 
-  const handleCustomFoodsChange = (foods) => {
+  // Salva/remove alimento(s) na coleção alimentos_db
+  const handleCustomFoodsChange = async (foods, opts = {}) => {
     setCustomFoods(foods);
-    fbSave('nutriplan', 'customFoods', { list: foods });
+    setSyncing(true);
+    try {
+      const { added, removed, batchAdd } = opts;
+      if (removed) await FB.excluirAlimento(removed);
+      if (added)   await FB.salvarAlimento(added);
+      if (batchAdd?.length) {
+        // salva em lotes de 500 (limite do Firestore batch)
+        for (let i = 0; i < batchAdd.length; i += 400) {
+          const chunk = batchAdd.slice(i, i + 400);
+          const batch = db.batch();
+          chunk.forEach(f => {
+            const id = toDocId(f.nome);
+            batch.set(db.collection('alimentos_db').doc(id), { ...f, _docId: id });
+          });
+          await batch.commit();
+        }
+      }
+    } catch(e) { console.error('handleCustomFoodsChange error:', e); }
+    finally { setSyncing(false); }
   };
 
-  // Salva o cardápio atual como template favorito
-  const saveTemplate = (nome) => {
+  // Salva o cardápio atual como template favorito na coleção 'favoritos'
+  const saveTemplate = async (nome) => {
     const t = {
       id: Date.now(),
       nome: nome.trim(),
-      meals: JSON.parse(JSON.stringify(patient.meals)), // deep copy
+      meals: JSON.parse(JSON.stringify(patient.meals)),
       rec1: patient.rec1 || '',
       rec2: patient.rec2 || '',
       savedAt: new Date().toLocaleDateString('pt-BR'),
     };
-    const updated = [...templates.filter(x => x.nome !== t.nome), t];
-    setTemplates(updated);
-    fbSave('nutriplan', 'templates', { list: updated });
+    // remove se já existia com esse nome
+    const antigo = templates.find(x => x.nome === t.nome);
+    if (antigo?._docId) await FB.excluirTemplate(antigo._docId);
+    const docId = await FB.salvarTemplate(t);
+    // o listener onFavoritosSnapshot atualiza o estado automaticamente
   };
 
-  const deleteTemplate = (id) => {
-    const updated = templates.filter(t => t.id !== id);
-    setTemplates(updated);
-    fbSave('nutriplan', 'templates', { list: updated });
+  const deleteTemplate = async (id) => {
+    const tpl = templates.find(t => t.id === id);
+    if (tpl?._docId) await FB.excluirTemplate(tpl._docId);
+    // listener atualiza o estado automaticamente
   };
 
   // Carrega um template: substitui refeições + recomendações, mantém dados do paciente
@@ -1738,26 +2305,43 @@ function App() {
 
   const patient = patients.find(p=>p.id===currentId) || patients[0];
 
-  const save = useCallback((updated) => {
-    setPatients(prev => {
-      const next = prev.map(p => p.id===updated.id ? updated : p);
-      fbSave('nutriplan', 'patients', { list: next });
-      return next;
-    });
+  // Timer de debounce para salvar no Firebase
+  const saveTimer = useRef(null);
+
+  const save = useCallback((updated, immediate = false) => {
+    // Atualiza estado React LOCALMENTE — sem tocar no Firebase ainda,
+    // então não há re-render vindo do onSnapshot e o foco é preservado.
+    setPatients(prev => prev.map(p => p.id === updated.id ? updated : p));
+
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+
+    if (immediate) {
+      // Ações estruturais (excluir, mover, toggle) salvam na hora
+      setSyncing(true);
+      FB.salvarPaciente(updated).finally(() => setSyncing(false));
+    } else {
+      // Digitação: aguarda 10s de inatividade antes de salvar no Firebase
+      // Isso evita que o onSnapshot do Firebase dispare re-renders durante a digitação
+      saveTimer.current = setTimeout(() => {
+        setSyncing(true);
+        FB.salvarPaciente(updated).finally(() => setSyncing(false));
+      }, 10000);
+    }
   }, []);
 
   const upd = (field, val) => save({...patient, [field]:val});
   const updProf = (field, val) => save({...patient, profissional:{...patient.profissional,[field]:val}});
 
-  const tmb = useMemo(() => patient.peso && patient.altura && patient.idade
-    ? calcTMB({peso:patient.peso,altura:patient.altura,idade:patient.idade,sexo:patient.sexo,gordura:patient.gordura,fa:patient.fa})
-    : null, [patient.peso,patient.altura,patient.idade,patient.sexo,patient.gordura,patient.fa]);
+  const idadePaciente = calcIdade(patient.dataNasc);
+  const tmb = useMemo(() => patient.peso && patient.altura && patient.dataNasc
+    ? calcTMB({peso:patient.peso,altura:patient.altura,dataNasc:patient.dataNasc,sexo:patient.sexo,gordura:patient.gordura,fa:patient.fa})
+    : null, [patient.peso,patient.altura,patient.dataNasc,patient.sexo,patient.gordura,patient.fa]);
 
   const targetKcal = tmb ? tmb[patient.tmb_formula] || tmb.mifflin : 2000;
 
-  const addMeal = () => save({...patient, meals:[...patient.meals, {id:Date.now(),nome:`Refeição ${patient.meals.length+1}`,items:[],incluirNoCalculo:true}]});
+  const addMeal = () => save({...patient, meals:[...patient.meals, {id:Date.now(),nome:`Refeição ${patient.meals.length+1}`,items:[],incluirNoCalculo:true}]}, true);
   const updateMeal = (m) => save({...patient, meals:patient.meals.map(x=>x.id===m.id?m:x)});
-  const deleteMeal = (id) => save({...patient, meals:patient.meals.filter(m=>m.id!==id)});
+  const deleteMeal = (id) => save({...patient, meals:patient.meals.filter(m=>m.id!==id)}, true);
 
   const moveMeal = (id, dir) => {
     const arr = [...patient.meals];
@@ -1778,29 +2362,49 @@ function App() {
 
   const addPatient = () => {
     const p = defaultPatient();
-    setPatients(prev => {
-      const n = [...prev, p];
-      fbSave('nutriplan', 'patients', { list: n });
-      return n;
-    });
+    setPatients(prev => [...prev, p]);
+    setSyncing(true);
+    FB.salvarPaciente(p).finally(() => setSyncing(false));
     setCurrentId(p.id);
   };
   const deletePatient = () => {
     if (patients.length<=1) return;
     const next = patients.filter(p=>p.id!==currentId);
     setPatients(next);
-    fbSave('nutriplan', 'patients', { list: next });
+    setSyncing(true);
+    FB.excluirPaciente(currentId).finally(() => setSyncing(false));
     setCurrentId(next[0].id);
   };
 
-  const inp = (label,field,type='text',opts={}) => (
-    <div style={{display:'flex',flexDirection:'column',gap:4,flex:opts.flex||'1 1 120px'}}>
-      <label style={{fontSize:11,color:G.muted,fontWeight:500}}>{label}</label>
-      <input type={type} value={patient[field]||''} onChange={e=>upd(field,type==='number'?parseFloat(e.target.value)||0:e.target.value)}
-        style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none'}}
-        {...opts}/>
-    </div>
-  );
+  // DebouncedInput: mantém estado local para não perder foco,
+  // só salva no Firebase quando o usuário clica fora (onBlur)
+  const DebouncedInput = ({ label, field, type='text', flex='1 1 120px', ...rest }) => {
+    const [localVal, setLocalVal] = useState(patient[field] ?? '');
+
+    // Sincroniza quando o paciente muda (troca de paciente ou carga do Firebase)
+    useEffect(() => { setLocalVal(patient[field] ?? ''); }, [patient.id, patient[field]]);
+
+    return (
+      <div style={{display:'flex',flexDirection:'column',gap:4,flex}}>
+        <label style={{fontSize:11,color:G.muted,fontWeight:500}}>{label}</label>
+        <input
+          type={type}
+          value={localVal}
+          onChange={e => setLocalVal(e.target.value)}
+          onBlur={e => {
+            const val = type === 'number' ? (parseFloat(e.target.value) || 0) : e.target.value;
+            if (val !== patient[field]) upd(field, val);
+          }}
+          style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,
+            borderRadius:8,color:G.text,fontSize:13,outline:'none'}}
+          {...rest}
+        />
+      </div>
+    );
+  };
+
+  const inp = (label, field, type='text', opts={}) =>
+    <DebouncedInput key={field + patient.id} label={label} field={field} type={type} {...opts}/>;
 
   const FA_OPTS = [
     {v:1.2,l:'Sedentário (1.2)'},{v:1.375,l:'Pouco ativo (1.375)'},
@@ -1825,33 +2429,283 @@ function App() {
     </div>
   );
 
+  // ── MODO: sem paciente selecionado → Dashboard global ──
+  const emModo = currentId !== null;
+
+  // ── CONTEÚDO DO PRONTUÁRIO ──────────────────────────────────────────────────
+  const ProntuarioContent = () => {
+    switch(tab) {
+      case 'cadastro': return (
+        <div style={{display:'flex',flexDirection:'column',gap:16}}>
+          <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
+            <div style={{fontWeight:700,marginBottom:12,fontSize:13,color:G.accent}}>👤 Dados do Paciente</div>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10}}>
+              {inp('Nome','nome')}
+              {inp('Objetivo','objetivo')}
+            </div>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10}}>
+              {inp('Telefone / WhatsApp','telefone')}
+              {inp('Instagram','instagram')}
+            </div>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+              <div style={{display:'flex',flexDirection:'column',gap:4,flex:'1 1 140px'}}>
+                <label style={{fontSize:11,color:G.muted,fontWeight:500}}>Data de Nascimento</label>
+                <input type="date" value={patient.dataNasc||''} onChange={e=>upd('dataNasc',e.target.value)}
+                  style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none'}}/>
+                {patient.dataNasc && (
+                  <span style={{fontSize:11,color:G.accent,marginTop:1}}>{idadePaciente} anos</span>
+                )}
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:4,flex:'1 1 100px'}}>
+                <label style={{fontSize:11,color:G.muted}}>Sexo</label>
+                <select value={patient.sexo} onChange={e=>upd('sexo',e.target.value)}
+                  style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none'}}>
+                  <option value="M">Masculino</option>
+                  <option value="F">Feminino</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <button onClick={deletePatient} disabled={patients.length<=1}
+            style={{alignSelf:'flex-start',padding:'6px 14px',background:'none',border:`1px solid ${G.danger}`,borderRadius:8,color:G.danger,fontSize:12,cursor:'pointer',opacity:patients.length<=1?0.3:1}}>
+            🗑 Excluir paciente
+          </button>
+        </div>
+      );
+
+      case 'avaliacao': return (
+        <div style={{display:'flex',flexDirection:'column',gap:16}}>
+
+          {/* Dados antropométricos */}
+          <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
+            <div style={{fontWeight:700,marginBottom:12,fontSize:13,color:G.accent}}>📏 Dados Antropométricos</div>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10}}>
+              {inp('Peso (kg)','peso','number')}
+              {inp('Altura (cm)','altura','number')}
+              {inp('% Gordura Corporal','gordura','number')}
+            </div>
+            {tmb && (
+              <div style={{display:'flex',gap:12,marginTop:4,flexWrap:'wrap'}}>
+                <div style={{padding:'8px 14px',background:`${G.accent}15`,borderRadius:8,border:`1px solid ${G.accent}30`}}>
+                  <div style={{fontSize:10,color:G.muted}}>Massa Magra</div>
+                  <div style={{fontWeight:700,color:G.accent,fontSize:15}}>{tmb.mlg}kg</div>
+                </div>
+                <div style={{padding:'8px 14px',background:`${G.warn}15`,borderRadius:8,border:`1px solid ${G.warn}30`}}>
+                  <div style={{fontSize:10,color:G.muted}}>Massa Gorda</div>
+                  <div style={{fontWeight:700,color:G.warn,fontSize:15}}>{tmb.mgorda}kg</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Fator de atividade */}
+          <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
+            <div style={{fontWeight:700,marginBottom:12,fontSize:13,color:G.accent}}>🏃 Fator de Atividade (FA)</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(150px,1fr))',gap:8,marginBottom:10}}>
+              {FA_OPTS.map(o=>(
+                <div key={o.v} onClick={()=>upd('fa',o.v)} style={{
+                  padding:'10px 12px',borderRadius:8,cursor:'pointer',
+                  border:`2px solid ${patient.fa===o.v?G.accent:G.border}`,
+                  background:patient.fa===o.v?`${G.accent}15`:G.panel,
+                  transition:'all .15s'}}>
+                  <div style={{fontWeight:700,color:patient.fa===o.v?G.accent:G.text,fontSize:14}}>{o.v}</div>
+                  <div style={{fontSize:11,color:G.muted,marginTop:2}}>{o.l.split('(')[0].trim()}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <label style={{fontSize:11,color:G.muted}}>Valor personalizado:</label>
+              <input type="number" step="0.01" min="1" max="2.5" value={patient.fa}
+                onChange={e=>upd('fa',parseFloat(e.target.value)||1)}
+                style={{width:72,padding:'5px 8px',background:G.panel,border:`1px solid ${G.border}`,
+                  borderRadius:6,color:G.text,fontSize:13,outline:'none'}}/>
+            </div>
+          </div>
+
+          {/* Fórmulas TMB */}
+          {tmb ? (
+            <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
+              <div style={{fontWeight:700,marginBottom:12,fontSize:13,color:G.accent}}>🔥 Taxa Metabólica Basal (GCD = TMB × FA)</div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:10}}>
+                {TMB_FMLS.map(f=>(
+                  <div key={f.k} onClick={()=>upd('tmb_formula',f.k)} style={{
+                    padding:12,borderRadius:10,border:`2px solid ${patient.tmb_formula===f.k?G.accent:G.border}`,
+                    cursor:'pointer',background:patient.tmb_formula===f.k?`${G.accent}15`:G.panel,transition:'all .2s'}}>
+                    <div style={{fontSize:11,color:G.muted,marginBottom:4}}>{f.l}</div>
+                    <div style={{fontSize:22,fontWeight:900,color:patient.tmb_formula===f.k?G.accent:G.text}}>{tmb[f.k]}</div>
+                    <div style={{fontSize:10,color:G.muted}}>kcal/dia</div>
+                    <div style={{fontSize:10,color:G.muted,marginTop:4}}>{f.desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:32,textAlign:'center',color:G.muted}}>
+              <div style={{fontSize:24,marginBottom:8}}>⚠️</div>
+              Preencha peso, altura e data de nascimento na aba Cadastro para calcular a TMB.
+            </div>
+          )}
+        </div>
+      );
+
+      case 'planejamento': return (
+        <div style={{display:'flex',flexDirection:'column',gap:12}}>
+          <TemplatesBar templates={templates} hasMeals={patient.meals.length>0}
+            onSave={saveTemplate} onLoad={loadTemplate} onDelete={deleteTemplate}/>
+          <div style={{display:'flex',flexDirection:'column',gap:4}}>
+            <label style={{fontSize:11,color:G.muted,fontWeight:500}}>Nome do Cardápio</label>
+            <DebouncedInput key={"nomeCardapio"+patient.id}
+              label=""
+              field="nomeCardapio"
+              flex="1 1 auto"
+              placeholder={`Ex: Fase de Adaptação, Semana 1, Cutting… (padrão: "${patient.objetivo||'Planejamento alimentar'}")`}
+              style={{padding:'8px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:8,
+                color:G.text,fontSize:13,outline:'none',width:'100%',boxSizing:'border-box'}}
+            />
+            <span style={{fontSize:10,color:G.muted}}>Este nome aparecerá no topo do relatório para o paciente.</span>
+          </div>
+          <div>
+            <label style={{fontSize:11,color:G.muted,fontWeight:500}}>Recomendações iniciais</label>
+            <textarea value={patient.rec1||''} onChange={e=>upd('rec1',e.target.value)} rows={3}
+              placeholder="Orientações para o paciente…"
+              style={{width:'100%',marginTop:4,padding:'10px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none',resize:'vertical',boxSizing:'border-box'}}/>
+          </div>
+          {patient.meals.map((m,idx)=>(
+            <MealTable key={m.id} meal={m} onChange={updateMeal}
+              onDelete={()=>deleteMeal(m.id)} onMoveUp={()=>moveMeal(m.id,-1)}
+              onMoveDown={()=>moveMeal(m.id,+1)} onToggleCalc={()=>toggleMealCalc(m.id)}
+              isFirst={idx===0} isLast={idx===patient.meals.length-1}
+              weight={patient.peso} customFoods={customFoods}/>
+          ))}
+          <button onClick={addMeal}
+            style={{padding:'10px',background:G.card,border:`1px dashed ${G.border}`,borderRadius:10,color:G.muted,cursor:'pointer',fontSize:13}}>
+            + Adicionar Refeição
+          </button>
+          <div>
+            <label style={{fontSize:11,color:G.muted,fontWeight:500}}>Recomendações adicionais</label>
+            <textarea value={patient.rec2||''} onChange={e=>upd('rec2',e.target.value)} rows={3}
+              placeholder="Orientações complementares…"
+              style={{width:'100%',marginTop:4,padding:'10px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none',resize:'vertical',boxSizing:'border-box'}}/>
+          </div>
+        </div>
+      );
+
+      case 'resumo': return (
+        <div style={{display:'flex',flexDirection:'column',gap:12}}>
+          <Summary meals={patient.meals} targetKcal={targetKcal} weight={patient.peso}/>
+          {patient.meals.length>0 && (
+            <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
+              <div style={{fontWeight:700,color:G.text,marginBottom:12,fontSize:13}}>🗓 Distribuição por Refeição</div>
+              <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+                <thead><tr style={{color:G.muted,borderBottom:`1px solid ${G.border}`}}>
+                  <th style={{textAlign:'left',padding:'4px 0',fontWeight:500}}>Refeição</th>
+                  <th style={{textAlign:'right',fontWeight:500}}>Kcal</th>
+                  <th style={{textAlign:'right',fontWeight:500}}>Ptn(A)</th>
+                  <th style={{textAlign:'right',fontWeight:500}}>Ptn(V)</th>
+                  <th style={{textAlign:'right',fontWeight:500}}>Carb</th>
+                  <th style={{textAlign:'right',fontWeight:500}}>Gord</th>
+                  <th style={{textAlign:'right',fontWeight:500}}>Fibra</th>
+                </tr></thead>
+                <tbody>
+                  {patient.meals.map(m=>{
+                    const ativo=m.incluirNoCalculo!==false;
+                    const t={kcal:0,ptn_a:0,ptn_v:0,carb:0,sat:0,poli:0,mono:0,fibra:0};
+                    m.items.forEach(({food,qtd})=>{
+                      t.kcal+=calcKcal(food,qtd);
+                      ['ptn_a','ptn_v','carb','sat','poli','mono','fibra'].forEach(k=>t[k]+=calcNutriente(food,qtd,k));
+                    });
+                    return (
+                      <tr key={m.id} style={{borderBottom:`1px solid ${G.border}30`,color:ativo?G.text:G.muted,opacity:ativo?1:0.5}}>
+                        <td style={{padding:'5px 0'}}>{m.nome}{!ativo&&<span style={{fontSize:10,color:G.muted,marginLeft:6,fontStyle:'italic'}}>(ignorado)</span>}</td>
+                        <td style={{textAlign:'right',color:ativo?G.accent:G.muted,fontWeight:600}}>{t.kcal.toFixed(0)}</td>
+                        <td style={{textAlign:'right'}}>{t.ptn_a.toFixed(1)}g</td>
+                        <td style={{textAlign:'right'}}>{t.ptn_v.toFixed(1)}g</td>
+                        <td style={{textAlign:'right'}}>{t.carb.toFixed(1)}g</td>
+                        <td style={{textAlign:'right'}}>{(t.sat+t.poli+t.mono).toFixed(1)}g</td>
+                        <td style={{textAlign:'right'}}>{t.fibra.toFixed(1)}g</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {patient.meals.length>0 && <PrintTemplate patient={patient} targetKcal={targetKcal}/>}
+        </div>
+      );
+
+      default: return null;
+    }
+  };
+
+  // ── SIDEBAR ITENS ───────────────────────────────────────────────────────────
+  const SIDEBAR = [
+    {k:'cadastro',  icon:'👤', label:'Cadastro'},
+    {k:'avaliacao', icon:'📐', label:'Avaliação'},
+    {k:'planejamento', icon:'🍽', label:'Planejamento'},
+    {k:'resumo',    icon:'📊', label:'Resumo'},
+  ];
+
   return (
     <div style={{minHeight:'100vh',background:G.bg,color:G.text,fontFamily:"'DM Sans',system-ui,sans-serif"}}>
-      {/* Barra superior */}
-      <div style={{background:G.panel,borderBottom:`1px solid ${G.border}`,padding:'0 16px',display:'flex',alignItems:'center',gap:12,height:48,position:'sticky',top:0,zIndex:50}}>
-        <span style={{fontWeight:900,fontSize:15,background:G.grad,WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',letterSpacing:'-0.5px'}}>
-          NutriPlan Pro
-        </span>
-        {syncing && (
+
+      {/* ── TOPBAR ─────────────────────────────────────────────────────────── */}
+      <div style={{background:G.panel,borderBottom:`1px solid ${G.border}`,padding:'0 20px',
+        display:'flex',alignItems:'center',gap:12,height:52,position:'sticky',top:0,zIndex:60}}>
+
+        {/* Logo ou botão voltar */}
+        {emModo ? (
+          <button onClick={()=>{ setCurrentId(null); setTab('dashboard'); }}
+            style={{display:'flex',alignItems:'center',gap:8,background:'none',border:'none',
+              cursor:'pointer',color:G.muted,padding:'4px 8px',borderRadius:8,fontSize:13,
+              transition:'color .15s'}}
+            onMouseEnter={e=>e.currentTarget.style.color=G.accent}
+            onMouseLeave={e=>e.currentTarget.style.color=G.muted}>
+            <span style={{fontSize:18}}>←</span>
+            <span style={{fontWeight:600}}>Pacientes</span>
+          </button>
+        ) : (
+          <span style={{fontWeight:900,fontSize:16,background:G.grad,
+            WebkitBackgroundClip:'text',WebkitTextFillColor:'transparent',letterSpacing:'-0.5px'}}>
+            NutriPlan Pro
+          </span>
+        )}
+
+        {/* Nome do paciente quando em modo prontuário */}
+        {emModo && patient && (
+          <div style={{display:'flex',alignItems:'center',gap:10,borderLeft:`1px solid ${G.border}`,paddingLeft:16}}>
+            <div style={{width:30,height:30,borderRadius:'50%',background:`${G.accent}30`,
+              display:'flex',alignItems:'center',justifyContent:'center',fontSize:13,color:G.accent,fontWeight:700}}>
+              {(patient.nome||'?')[0].toUpperCase()}
+            </div>
+            <div>
+              <div style={{fontWeight:700,fontSize:13,color:G.text,lineHeight:1.2}}>{patient.nome||'Novo Paciente'}</div>
+              {patient.objetivo && <div style={{fontSize:11,color:G.muted}}>{patient.objetivo}</div>}
+            </div>
+          </div>
+        )}
+
+        <div style={{flex:1}}/>
+
+        {/* Status sync */}
+        {syncing ? (
           <span style={{fontSize:10,color:G.muted,display:'flex',alignItems:'center',gap:4}}>
             <span style={{width:6,height:6,borderRadius:'50%',background:G.accent,display:'inline-block',animation:'pulse 1s infinite'}}/>
             salvando…
           </span>
+        ) : dbReady && (
+          <span style={{fontSize:10,color:G.accent}}>☁️</span>
         )}
-        {!syncing && dbReady && (
-          <span style={{fontSize:10,color:G.accent,display:'flex',alignItems:'center',gap:4}}>☁️ sincronizado</span>
+
+        {/* Botão profissional + alimentos */}
+        {!emModo && (
+          <button onClick={()=>{ setCurrentId(null); setTab('foods'); }}
+            style={{padding:'5px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:6,color:G.muted,fontSize:12,cursor:'pointer'}}>
+            🥦 Alimentos
+          </button>
         )}
-        <div style={{flex:1,display:'flex',gap:4,overflowX:'auto'}}>
-          {patients.map(p=>(
-            <button key={p.id} onClick={()=>setCurrentId(p.id)}
-              style={{padding:'4px 12px',borderRadius:6,border:'none',fontSize:12,cursor:'pointer',whiteSpace:'nowrap',
-                background:p.id===currentId?G.accent:G.card,color:p.id===currentId?'#0f1117':G.muted,fontWeight:p.id===currentId?700:400}}>
-              {p.nome||'Novo Paciente'}
-            </button>
-          ))}
-          <button onClick={addPatient} style={{padding:'4px 10px',borderRadius:6,border:`1px dashed ${G.border}`,background:'none',color:G.muted,fontSize:12,cursor:'pointer'}}>+ Paciente</button>
-        </div>
-        <button onClick={()=>setShowProf(!showProf)} style={{padding:'4px 10px',background:G.card,border:`1px solid ${G.border}`,borderRadius:6,color:G.muted,fontSize:12,cursor:'pointer'}}>
+        <button onClick={()=>setShowProf(!showProf)}
+          style={{padding:'5px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:6,color:G.muted,fontSize:12,cursor:'pointer'}}>
           ⚙ Profissional
         </button>
       </div>
@@ -1861,10 +2715,10 @@ function App() {
         <div style={{position:'fixed',inset:0,background:'#000000aa',zIndex:100,display:'flex',alignItems:'center',justifyContent:'center'}}>
           <div style={{background:G.panel,borderRadius:16,padding:24,width:320,border:`1px solid ${G.border}`}}>
             <div style={{fontWeight:700,marginBottom:16}}>Dados do Profissional</div>
-            {['nome','crn','contato'].map(f=>(
-              <div key={f} style={{marginBottom:10}}>
-                <label style={{fontSize:11,color:G.muted}}>{f.toUpperCase()}</label>
-                <input value={patient.profissional[f]||''} onChange={e=>updProf(f,e.target.value)}
+            {[{k:'nome',l:'Nome'},{k:'crn',l:'CRN'},{k:'contato',l:'Telefone / Contato'},{k:'instagram',l:'Instagram'}].map(({k,l})=>(
+              <div key={k} style={{marginBottom:10}}>
+                <label style={{fontSize:11,color:G.muted}}>{l}</label>
+                <input value={patient?.profissional?.[k]||''} onChange={e=>updProf(k,e.target.value)}
                   style={{width:'100%',marginTop:4,padding:'7px 10px',background:G.card,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none',boxSizing:'border-box'}}/>
               </div>
             ))}
@@ -1873,213 +2727,92 @@ function App() {
         </div>
       )}
 
-      {/* Tabs — sticky abaixo da navbar */}
-      <div style={{position:'sticky',top:48,zIndex:40,background:G.bg,borderBottom:`1px solid ${G.border}`}}>
-        <div style={{maxWidth:960,margin:'0 auto',padding:'0 12px',display:'flex',gap:4}}>
-          {[{k:'tmb',l:'📐 Avaliação'},{k:'diet',l:'🍽 Plano Alimentar'},{k:'summary',l:'📊 Resumo'},{k:'foods',l:'🥦 Alimentos'}].map(t=>(
-            <button key={t.k} onClick={()=>setTab(t.k)}
-              style={{padding:'10px 18px',background:'none',border:'none',
-                borderBottom:tab===t.k?`2px solid ${G.accent}`:'2px solid transparent',
-                color:tab===t.k?G.accent:G.muted,fontWeight:tab===t.k?700:400,
-                cursor:'pointer',fontSize:13,transition:'color .15s'}}>
-              {t.l}
-            </button>
-          ))}
+      {/* ── MODO DASHBOARD (nenhum paciente selecionado) ──────────────────── */}
+      {!emModo && tab !== 'foods' && (
+        <div style={{maxWidth:640,margin:'0 auto',padding:'24px 16px'}}>
+          <Dashboard
+            patients={patients}
+            onSelectPatient={(id)=>{ setCurrentId(id); setTab('cadastro'); }}
+            onAddPatient={addPatient}
+          />
         </div>
-      </div>
+      )}
 
-      <div style={{maxWidth:960,margin:'0 auto',padding:'16px 12px'}}>
+      {/* ABA Alimentos (global, fora do prontuário) */}
+      {!emModo && tab === 'foods' && (
+        <div style={{maxWidth:960,margin:'0 auto',padding:'16px 12px'}}>
+          <FoodManager customFoods={customFoods} onCustomFoodsChange={handleCustomFoodsChange}/>
+        </div>
+      )}
 
-        {/* ABA: Avaliação */}
-        {tab==='tmb' && (
-          <div style={{display:'flex',flexDirection:'column',gap:16}}>
-            <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
-              <div style={{fontWeight:700,marginBottom:12,fontSize:13,color:G.accent}}>👤 Dados do Paciente</div>
-              <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10}}>
-                {inp('Nome','nome')}
-                {inp('Objetivo','objetivo')}
+      {/* ── MODO PRONTUÁRIO (paciente selecionado) ───────────────────────── */}
+      {emModo && (
+        <div style={{display:'flex',minHeight:'calc(100vh - 52px)'}}>
+
+          {/* Sidebar esquerda */}
+          <div style={{
+            width:200, flexShrink:0, background:G.panel,
+            borderRight:`1px solid ${G.border}`,
+            padding:'16px 0', position:'sticky', top:52, height:'calc(100vh - 52px)',
+            overflowY:'auto', display:'flex', flexDirection:'column', gap:4,
+          }}>
+            {/* Avatar + nome compacto */}
+            <div style={{padding:'0 16px 16px',borderBottom:`1px solid ${G.border}`,marginBottom:8}}>
+              <div style={{width:44,height:44,borderRadius:'50%',
+                background:`linear-gradient(135deg,${G.accent}40,${G.info}40)`,
+                display:'flex',alignItems:'center',justifyContent:'center',
+                fontSize:20,color:G.accent,fontWeight:900,marginBottom:8}}>
+                {(patient.nome||'?')[0].toUpperCase()}
               </div>
-              <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:10}}>
-                {inp('Peso (kg)','peso','number')}
-                {inp('Altura (cm)','altura','number')}
-                {inp('Idade','idade','number')}
-                <div style={{display:'flex',flexDirection:'column',gap:4,flex:'1 1 80px'}}>
-                  <label style={{fontSize:11,color:G.muted}}>Sexo</label>
-                  <select value={patient.sexo} onChange={e=>upd('sexo',e.target.value)}
-                    style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none'}}>
-                    <option value="M">Masculino</option>
-                    <option value="F">Feminino</option>
-                  </select>
+              <div style={{fontSize:12,fontWeight:700,color:G.text,lineHeight:1.3}}>{patient.nome||'Novo Paciente'}</div>
+              {patient.dataNasc && <div style={{fontSize:10,color:G.muted,marginTop:2}}>{idadePaciente} anos</div>}
+              {patient.objetivo && <div style={{fontSize:10,color:G.muted,marginTop:1,fontStyle:'italic'}}>{patient.objetivo}</div>}
+              {tmb && (
+                <div style={{marginTop:8,padding:'6px 8px',background:`${G.accent}15`,borderRadius:6,border:`1px solid ${G.accent}30`}}>
+                  <div style={{fontSize:9,color:G.muted,textTransform:'uppercase',letterSpacing:'0.5px'}}>GCD</div>
+                  <div style={{fontSize:16,fontWeight:900,color:G.accent}}>{targetKcal} <span style={{fontSize:10,fontWeight:400}}>kcal</span></div>
                 </div>
-                {inp('% Gordura','gordura','number')}
-              </div>
-              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-                <div style={{flex:'1 1 200px',display:'flex',flexDirection:'column',gap:4}}>
-                  <label style={{fontSize:11,color:G.muted}}>Fator de Atividade (FA)</label>
-                  <input
-                    type="number" step="0.01" min="1" max="2.5"
-                    value={patient.fa}
-                    onChange={e => upd('fa', parseFloat(e.target.value) || 1)}
-                    style={{padding:'7px 10px',background:G.panel,border:`1px solid ${G.border}`,
-                      borderRadius:8,color:G.text,fontSize:13,outline:'none'}}
-                  />
-                  <div style={{fontSize:10,color:G.muted,lineHeight:1.7,marginTop:2}}>
-                    {FA_OPTS.map(o => (
-                      <div key={o.v} style={{display:'flex',gap:6,cursor:'pointer'}}
-                        onClick={() => upd('fa', o.v)}>
-                        <span style={{color:G.accent,minWidth:34}}>{o.v}</span>
-                        <span>{o.l.split('(')[0].trim()}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                {tmb && (
-                  <div style={{flex:'1 1 200px',display:'flex',gap:8,alignItems:'center',padding:'8px 12px',background:G.panel,borderRadius:8,border:`1px solid ${G.border}`}}>
-                    <div>
-                      <div style={{fontSize:11,color:G.muted}}>Massa Magra</div>
-                      <div style={{fontWeight:700,color:G.accent}}>{tmb.mlg}kg</div>
-                    </div>
-                    <div style={{width:1,height:30,background:G.border}}/>
-                    <div>
-                      <div style={{fontSize:11,color:G.muted}}>Massa Gorda</div>
-                      <div style={{fontWeight:700,color:G.warn}}>{tmb.mgorda}kg</div>
-                    </div>
-                  </div>
-                )}
-              </div>
+              )}
             </div>
 
-            {/* Fórmulas TMB */}
-            {tmb && (
-              <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
-                <div style={{fontWeight:700,marginBottom:12,fontSize:13,color:G.accent}}>🔥 Taxa Metabólica Basal (GCD = TMB × FA)</div>
-                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:10}}>
-                  {TMB_FMLS.map(f=>(
-                    <div key={f.k} onClick={()=>upd('tmb_formula',f.k)} style={{
-                      padding:12,borderRadius:10,border:`2px solid ${patient.tmb_formula===f.k?G.accent:G.border}`,
-                      cursor:'pointer',background:patient.tmb_formula===f.k?`${G.accent}15`:G.panel,transition:'all .2s'}}>
-                      <div style={{fontSize:11,color:G.muted,marginBottom:4}}>{f.l}</div>
-                      <div style={{fontSize:22,fontWeight:900,color:patient.tmb_formula===f.k?G.accent:G.text}}>{tmb[f.k]}</div>
-                      <div style={{fontSize:10,color:G.muted}}>kcal/dia</div>
-                      <div style={{fontSize:10,color:G.muted,marginTop:4}}>{f.desc}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            <button onClick={deletePatient} disabled={patients.length<=1}
-              style={{alignSelf:'flex-start',padding:'6px 14px',background:'none',border:`1px solid ${G.danger}`,borderRadius:8,color:G.danger,fontSize:12,cursor:'pointer',opacity:patients.length<=1?0.3:1}}>
-              🗑 Excluir paciente
-            </button>
-          </div>
-        )}
-
-        {/* ABA: Plano Alimentar */}
-        {tab==='diet' && (
-          <div style={{display:'flex',flexDirection:'column',gap:12}}>
-
-            {/* ── BARRA DE TEMPLATES FAVORITOS ── */}
-            <TemplatesBar
-              templates={templates}
-              hasMeals={patient.meals.length > 0}
-              onSave={saveTemplate}
-              onLoad={loadTemplate}
-              onDelete={deleteTemplate}
-            />
-
-            <div>
-              <label style={{fontSize:11,color:G.muted,fontWeight:500}}>Recomendações iniciais</label>
-              <textarea value={patient.rec1||''} onChange={e=>upd('rec1',e.target.value)} rows={3}
-                placeholder="Orientações para o paciente…"
-                style={{width:'100%',marginTop:4,padding:'10px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none',resize:'vertical',boxSizing:'border-box'}}/>
-            </div>
-            {patient.meals.map((m, idx)=>(
-              <MealTable
-                key={m.id}
-                meal={m}
-                onChange={updateMeal}
-                onDelete={()=>deleteMeal(m.id)}
-                onMoveUp={()=>moveMeal(m.id,-1)}
-                onMoveDown={()=>moveMeal(m.id,+1)}
-                onToggleCalc={()=>toggleMealCalc(m.id)}
-                isFirst={idx===0}
-                isLast={idx===patient.meals.length-1}
-                weight={patient.peso}
-                customFoods={customFoods}
-              />
+            {/* Itens de navegação */}
+            {SIDEBAR.map(item=>(
+              <button key={item.k} onClick={()=>setTab(item.k)}
+                style={{
+                  display:'flex', alignItems:'center', gap:10,
+                  padding:'10px 16px', background: tab===item.k ? `${G.accent}18` : 'transparent',
+                  border:'none', borderLeft: tab===item.k ? `3px solid ${G.accent}` : '3px solid transparent',
+                  color: tab===item.k ? G.accent : G.muted,
+                  fontWeight: tab===item.k ? 700 : 400,
+                  cursor:'pointer', fontSize:13, textAlign:'left', width:'100%',
+                  transition:'all .15s',
+                }}>
+                <span style={{fontSize:16}}>{item.icon}</span>
+                <span>{item.label}</span>
+              </button>
             ))}
-            <button onClick={addMeal}
-              style={{padding:'10px',background:G.card,border:`1px dashed ${G.border}`,borderRadius:10,color:G.muted,cursor:'pointer',fontSize:13,transition:'all .2s'}}>
-              + Adicionar Refeição
-            </button>
-            <div>
-              <label style={{fontSize:11,color:G.muted,fontWeight:500}}>Recomendações adicionais</label>
-              <textarea value={patient.rec2||''} onChange={e=>upd('rec2',e.target.value)} rows={3}
-                placeholder="Orientações complementares…"
-                style={{width:'100%',marginTop:4,padding:'10px 12px',background:G.card,border:`1px solid ${G.border}`,borderRadius:8,color:G.text,fontSize:13,outline:'none',resize:'vertical',boxSizing:'border-box'}}/>
-            </div>
-          </div>
-        )}
 
-        {/* ABA: Resumo */}
-        {tab==='summary' && (
-          <div style={{display:'flex',flexDirection:'column',gap:12}}>
-            <Summary meals={patient.meals} targetKcal={targetKcal} weight={patient.peso}/>
-            {/* Tabela por refeição */}
-            {patient.meals.length > 0 && (
-              <div style={{background:G.card,borderRadius:12,border:`1px solid ${G.border}`,padding:16}}>
-                <div style={{fontWeight:700,color:G.text,marginBottom:12,fontSize:13}}>🗓 Distribuição por Refeição</div>
-                <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
-                  <thead><tr style={{color:G.muted,borderBottom:`1px solid ${G.border}`}}>
-                    <th style={{textAlign:'left',padding:'4px 0',fontWeight:500}}>Refeição</th>
-                    <th style={{textAlign:'right',fontWeight:500}}>Kcal</th>
-                    <th style={{textAlign:'right',fontWeight:500}}>Ptn(A)</th>
-                    <th style={{textAlign:'right',fontWeight:500}}>Ptn(V)</th>
-                    <th style={{textAlign:'right',fontWeight:500}}>Carb</th>
-                    <th style={{textAlign:'right',fontWeight:500}}>Gord</th>
-                    <th style={{textAlign:'right',fontWeight:500}}>Fibra</th>
-                  </tr></thead>
-                  <tbody>
-                    {patient.meals.map(m=>{
-                      const ativo = m.incluirNoCalculo !== false;
-                      const t = {kcal:0,ptn_a:0,ptn_v:0,carb:0,sat:0,poli:0,mono:0,fibra:0};
-                      m.items.forEach(({food,qtd})=>{
-                        t.kcal+=calcKcal(food,qtd);
-                        ['ptn_a','ptn_v','carb','sat','poli','mono','fibra'].forEach(k=>t[k]+=calcNutriente(food,qtd,k));
-                      });
-                      return (
-                        <tr key={m.id} style={{borderBottom:`1px solid ${G.border}30`,
-                          color: ativo ? G.text : G.muted, opacity: ativo ? 1 : 0.5}}>
-                          <td style={{padding:'5px 0'}}>
-                            {m.nome}
-                            {!ativo && <span style={{fontSize:10,color:G.muted,marginLeft:6,fontStyle:'italic'}}>(ignorado)</span>}
-                          </td>
-                          <td style={{textAlign:'right',color: ativo ? G.accent : G.muted,fontWeight:600}}>{t.kcal.toFixed(0)}</td>
-                          <td style={{textAlign:'right'}}>{t.ptn_a.toFixed(1)}g</td>
-                          <td style={{textAlign:'right'}}>{t.ptn_v.toFixed(1)}g</td>
-                          <td style={{textAlign:'right'}}>{t.carb.toFixed(1)}g</td>
-                          <td style={{textAlign:'right'}}>{(t.sat+t.poli+t.mono).toFixed(1)}g</td>
-                          <td style={{textAlign:'right'}}>{t.fibra.toFixed(1)}g</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+            {/* Atalho: TMB no planejamento */}
+            {tab === 'planejamento' && tmb && (
+              <div style={{margin:'8px 12px',padding:'8px 10px',background:G.card,borderRadius:8,border:`1px solid ${G.border}`}}>
+                <div style={{fontSize:9,color:G.muted,textTransform:'uppercase',letterSpacing:'0.5px',marginBottom:4}}>Fórmulas TMB</div>
+                {TMB_FMLS.map(f=>(
+                  <div key={f.k} style={{display:'flex',justifyContent:'space-between',fontSize:11,marginBottom:2,
+                    color: patient.tmb_formula===f.k ? G.accent : G.muted,fontWeight:patient.tmb_formula===f.k?700:400}}>
+                    <span>{f.l.split('-')[0].trim()}</span>
+                    <span>{tmb[f.k]}</span>
+                  </div>
+                ))}
               </div>
             )}
-
-            {/* ── TEMPLATE DE IMPRESSÃO (fiel à aba Template da planilha) ── */}
-            {patient.meals.length > 0 && (
-              <PrintTemplate patient={patient} targetKcal={targetKcal} />
-            )}
           </div>
-        )}
 
-        {/* ABA: Alimentos */}
-        {tab==='foods' && (
-          <FoodManager customFoods={customFoods} onCustomFoodsChange={handleCustomFoodsChange} />
-        )}
-      </div>
+          {/* Área de conteúdo */}
+          <div style={{flex:1,padding:'20px 24px',overflowY:'auto',minWidth:0}}>
+            <ProntuarioContent/>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
