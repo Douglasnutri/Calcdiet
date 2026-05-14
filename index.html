@@ -260,9 +260,10 @@ const FoodSearch = React.memo(({ onAdd, allFoods }) => {
   const [qtd, setQtd]           = useState('');
   const [sel, setSel]           = useState(null);
   const wrapRef   = useRef();   // div externa (fecha ao clicar fora)
-  const inputRef  = useRef();   // input de busca
-  const qtdRef    = useRef();   // input de quantidade
-  const listRef   = useRef();   // div da lista (para scroll automático)
+const inputRef  = useRef();   // input de busca
+const qtdRef    = useRef();   // input de quantidade
+const listRef   = useRef();   // div da lista (para scroll automático)
+const pendingSearchFocusRef = useRef(false); // refoca a busca após adicionar
 
   const results = useMemo(() => {
     if (!query.trim()) return [];
@@ -290,6 +291,21 @@ const FoodSearch = React.memo(({ onAdd, allFoods }) => {
     }
   }, [highlighted]);
 
+  const focusSearchInput = useCallback(() => {
+  requestAnimationFrame(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  });
+}, []);
+
+useEffect(() => {
+  if (!pendingSearchFocusRef.current) return;
+  pendingSearchFocusRef.current = false;
+  focusSearchInput();
+}, [query, sel, qtd, open, focusSearchInput]);
+
   const choose = (f) => {
     setSel(f);
     setQuery(f.nome);
@@ -304,24 +320,15 @@ const FoodSearch = React.memo(({ onAdd, allFoods }) => {
   };
 
   const add = useCallback(() => {
-    if (!sel) return;
-    const parsedQtd = parseFloat(qtd) || (sel.unidade || sel.unidade_base === 'un' ? 1 : 100);
-    // Guarda ref do input ANTES de qualquer mudança de estado
-    const inputEl = inputRef.current;
-    // Chama onAdd (estável graças ao useCallback+refs no MealTable)
-    onAdd({ food: sel, qtd: parsedQtd });
-    // Limpa estado local
-    setQuery(''); setSel(null); setQtd(''); setOpen(false); setHigh(-1);
-    // Devolve foco: tenta imediatamente e como fallback após 3 frames
-    if (inputEl) {
-      inputEl.focus();
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => { inputEl.focus(); });
-        });
-      });
-    }
-  }, [sel, qtd, onAdd]);
+  if (!sel) return;
+  const parsedQtd = parseFloat(qtd) || (sel.unidade || sel.unidade_base === 'un' ? 1 : 100);
+  pendingSearchFocusRef.current = true;
+  // Chama onAdd (estável graças ao useCallback+refs no MealTable)
+  onAdd({ food: sel, qtd: parsedQtd });
+  // Limpa estado local; o useEffect acima devolve o foco após o React aplicar o estado
+  setQuery(''); setSel(null); setQtd(''); setOpen(false); setHigh(-1);
+  focusSearchInput();
+}, [sel, qtd, onAdd, focusSearchInput]);
 
   // Navegação por teclado no input de busca
   const handleSearchKey = (e) => {
